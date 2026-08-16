@@ -8,13 +8,13 @@ This is beta software. A restore can erase the connected device, and tethered in
 
 - macOS 12 or later
 - An Intel or Apple Silicon Mac
-- Xcode 27 to build the checked-in project
+- Xcode 13 or later to build the checked-in project
 - A surrealra1n-supported device
 - Internet access while the app starts
 
 Virtual machines are not supported. The app will not work inside a VM. The iPhone must be connected directly to the physical Mac because the USB connection and DFU handoffs need direct access to the device.
 
-The release is universal and contains native `x86_64` and `arm64` code. Mojave is not advertised because the current Xcode toolchain cannot produce or verify a macOS 10.14 build.
+The release is universal and contains native `x86_64` and `arm64` code.
 
 ## How it works
 
