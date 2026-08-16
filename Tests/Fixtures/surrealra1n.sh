@@ -1,5 +1,9 @@
 #!/bin/bash
 
+set -u
+IDENTIFIER="iPhone12,3"
+ECID="1234"
+
 pick_file() {
     echo "$2"
 }
@@ -113,6 +117,9 @@ untethered_menu() {
 }
 
 main_menu
+echo "A12/A13 device support is entirely experimental."
+echo "Expect to have issues or bugs."
+read -p "Press enter to continue"
 if [[ "${SURREAL_TEST_EARLY_EXIT:-}" == "1" ]]; then
     restore_menu &
     exit 0

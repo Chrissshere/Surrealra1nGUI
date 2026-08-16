@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "$0")/.." && pwd)
-VERSION=${1:-0.0.3-beta-rr}
+VERSION=${1:-0.0.3-beta-rr2}
 BUILD_ROOT=$(mktemp -d /tmp/surrealra1n-package.XXXXXX)
 DERIVED_DATA="$BUILD_ROOT/DerivedData"
 APP_PATH="$DERIVED_DATA/Build/Products/Release/surrealra1n.app"
