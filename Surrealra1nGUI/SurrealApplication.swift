@@ -60,8 +60,8 @@ final class SurrealApplication: NSObject, NSApplicationDelegate {
     @objc private func showAboutPanel() {
         NSApp.orderFrontStandardAboutPanel(options: [
             .applicationName: "surrealra1n",
-            .applicationVersion: "0.0.2 beta",
-            .version: "Build 2",
+            .applicationVersion: "0.0.3 beta",
+            .version: "Build 3",
             .credits: NSAttributedString(string: "GUI by chrissyx\nsurrealra1n by pwnerblu")
         ])
     }
