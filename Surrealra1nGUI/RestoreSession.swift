@@ -61,7 +61,28 @@ final class RestoreSession {
         temporaryScript = scriptURL
 
         let envURL = FileManager.default.temporaryDirectory.appendingPathComponent("surrealra1n-gui-env-\(sessionID).sh")
-        try "sudo() { command /usr/bin/sudo -A \"$@\"; }\n".write(to: envURL, atomically: true, encoding: .utf8)
+        let shellEnvironment = """
+read() {
+    local prompt=""
+    local arguments=()
+    while [[ $# -gt 0 ]]; do
+        if [[ "$1" == "-p" ]]; then
+            shift
+            prompt="${1-}"
+        else
+            arguments+=("$1")
+        fi
+        shift
+    done
+    if [[ -n "$prompt" ]]; then
+        printf '%s' "$prompt" >&2
+    fi
+    builtin read "${arguments[@]}"
+}
+sudo() { command /usr/bin/sudo -A "$@"; }
+
+"""
+        try shellEnvironment.write(to: envURL, atomically: true, encoding: .utf8)
         environmentFile = envURL
 
         let task = Process()
@@ -163,28 +184,28 @@ final class RestoreSession {
 
         if b.contains("Would you like to update now? (y/n):") {
             sendAutomated("n")
-        } else if b.contains("1. Downgrade Options") && b.contains("Please input an option (1-4):") {
+        } else if containsAll(["1. Downgrade Options", "2. Misc Utilities", "4. Exit"], in: b) {
             sendAutomated("1")
         } else if b.contains("A12/A13 device support is entirely experimental") && b.contains("Press enter to continue") {
             sendAutomated("")
-        } else if b.contains("1. Restore (with SHSH blobs)") && b.contains("Please input an option (1-5):") {
+        } else if containsAll(["1. Restore (with SHSH blobs)", "2. Restore (Tethered)", "4. Just Boot", "5. Back"], in: b) {
             switch operation {
             case .restoreWithBlobs: sendAutomated("1")
             case .tetheredRestore: sendAutomated("2")
             case .untethered1033: sendAutomated("3")
             case .justBoot: sendAutomated("4")
             }
-        } else if operation == .tetheredRestore && b.contains("1. Select Target IPSW") && b.contains("2. Select Base IPSW") && b.contains("Please input an option (1-4):") {
+        } else if operation == .tetheredRestore && containsAll(["1. Select Target IPSW", "2. Select Base IPSW", "3. Start Restore", "4. Back"], in: b) {
             menuStep += 1
             if menuStep == 1 { sendAutomated("1") }
             else if menuStep == 2 { sendAutomated("2") }
             else { sendAutomated("3") }
-        } else if operation == .restoreWithBlobs && b.contains("1. Select Target IPSW") && b.contains("2. Select SHSH") && b.contains("Please input an option (1-4):") {
+        } else if operation == .restoreWithBlobs && containsAll(["1. Select Target IPSW", "2. Select SHSH", "3. Start Restore", "4. Back"], in: b) {
             menuStep += 1
             if menuStep == 1 { sendAutomated("1") }
             else if menuStep == 2 { sendAutomated("2") }
             else { sendAutomated("3") }
-        } else if operation == .untethered1033 && b.contains("1. Select 10.3.3 IPSW") && b.contains("Please input an option (1-3):") {
+        } else if operation == .untethered1033 && containsAll(["1. Select 10.3.3 IPSW", "2. Start Restore", "3. Back"], in: b) {
             menuStep += 1
             sendAutomated(menuStep == 1 ? "1" : "2")
         } else if b.localizedCaseInsensitiveContains("Input the version you'd like to boot:") {
@@ -209,6 +230,10 @@ final class RestoreSession {
 
     private func sendAutomated(_ value: String) {
         respond(value)
+    }
+
+    private func containsAll(_ values: [String], in text: String) -> Bool {
+        return values.allSatisfy { text.contains($0) }
     }
 
     private func request(_ prompt: RestorePrompt) {
