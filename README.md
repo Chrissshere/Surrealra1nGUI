@@ -48,6 +48,21 @@ To create the universal DMG and PKG used for a release:
 ./scripts/package-release.sh 0.0.3-beta-rr2
 ```
 
+## Publishing a release
+
+The `Build macOS release` GitHub Actions workflow packages and publishes the
+universal DMG and PKG, along with SHA-256 checksums. Push a version tag to run
+it:
+
+```bash
+git tag v0.0.3-beta-rr2
+git push origin v0.0.3-beta-rr2
+```
+
+The workflow can also be started manually from the Actions tab by entering a
+version such as `0.0.3-beta-rr2`. Versions containing a suffix after the patch
+number are published as pre-releases.
+
 ## Demo mode
 
 The fake-device workflow is kept out of the normal interface. Developers can expose it locally with:

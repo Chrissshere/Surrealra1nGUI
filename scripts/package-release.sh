@@ -7,6 +7,7 @@ VERSION=${1:-0.0.3-beta-rr2}
 BUILD_ROOT=$(mktemp -d /tmp/surrealra1n-package.XXXXXX)
 DERIVED_DATA="$BUILD_ROOT/DerivedData"
 APP_PATH="$DERIVED_DATA/Build/Products/Release/surrealra1n.app"
+APP_EXECUTABLE="$APP_PATH/Contents/MacOS/surrealra1n"
 STAGING_DIR="$BUILD_ROOT/dmg"
 DIST_DIR="$ROOT_DIR/dist"
 DMG_PATH="$DIST_DIR/surrealra1n-$VERSION-macOS-universal.dmg"
@@ -29,6 +30,13 @@ xcodebuild \
     ONLY_ACTIVE_ARCH=NO \
     CODE_SIGNING_ALLOWED=NO \
     build
+
+if ! lipo "$APP_EXECUTABLE" -verify_arch arm64 x86_64; then
+    echo "error: release binary is not universal (arm64 and x86_64)" >&2
+    exit 1
+fi
+
+lipo -info "$APP_EXECUTABLE"
 
 codesign --force --deep --sign - "$APP_PATH"
 codesign --verify --deep --strict "$APP_PATH"
