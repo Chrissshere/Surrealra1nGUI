@@ -38,6 +38,8 @@ final class RestoreSession {
     private var askpassFile: URL?
     private var operation: RestoreOperation = .tetheredRestore
     private var dfuPhase = ""
+    private var acceptsInput = false
+    private var restoreStarted = false
 
     var isRunning: Bool { return process?.isRunning == true }
 
@@ -122,6 +124,8 @@ sudo() { command /usr/bin/sudo -A "$@"; }
         awaitingUser = false
         maximumProgress = 0
         dfuPhase = ""
+        acceptsInput = true
+        restoreStarted = false
 
         output.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
@@ -133,9 +137,13 @@ sudo() { command /usr/bin/sudo -A "$@"; }
             output.fileHandleForReading.readabilityHandler = nil
             let remaining = output.fileHandleForReading.readDataToEndOfFile()
             DispatchQueue.main.async {
-                if !remaining.isEmpty { self?.consume(String(decoding: remaining, as: UTF8.self)) }
-                self?.cleanup()
-                if let self = self { self.delegate?.restoreSession(self, didFinishWith: task.terminationStatus) }
+                guard let self = self else { return }
+                self.acceptsInput = false
+                if !remaining.isEmpty {
+                    self.consume(String(decoding: remaining, as: UTF8.self), allowAutomation: false)
+                }
+                self.cleanup()
+                self.delegate?.restoreSession(self, didFinishWith: task.terminationStatus)
             }
         }
 
@@ -157,8 +165,16 @@ sudo() { command /usr/bin/sudo -A "$@"; }
     }
 
     func respond(_ response: String) {
-        guard let data = (response + "\n").data(using: .utf8) else { return }
-        inputPipe?.fileHandleForWriting.write(data)
+        guard acceptsInput,
+              process?.isRunning == true,
+              let handle = inputPipe?.fileHandleForWriting,
+              let data = (response + "\n").data(using: .utf8) else { return }
+        do {
+            try handle.write(contentsOf: data)
+        } catch {
+            acceptsInput = false
+            delegate?.restoreSession(self, received: "\nThe restore process stopped accepting input: \(error.localizedDescription)\n")
+        }
         awaitingUser = false
         automationBuffer = ""
     }
@@ -167,7 +183,7 @@ sudo() { command /usr/bin/sudo -A "$@"; }
         process?.interrupt()
     }
 
-    private func consume(_ text: String) {
+    private func consume(_ text: String, allowAutomation: Bool = true) {
         delegate?.restoreSession(self, received: text)
         automationBuffer += text.replacingOccurrences(of: "\u{001B}\\[[0-9;?]*[ -/]*[@-~]", with: "", options: .regularExpression)
         if automationBuffer.count > 16_000 {
@@ -175,7 +191,9 @@ sudo() { command /usr/bin/sudo -A "$@"; }
         }
         updateProgress(from: text)
         updateDFUGuide(from: text)
-        handleAutomation()
+        if allowAutomation && acceptsInput && process?.isRunning == true {
+            handleAutomation()
+        }
     }
 
     private func handleAutomation() {
@@ -199,15 +217,16 @@ sudo() { command /usr/bin/sudo -A "$@"; }
             menuStep += 1
             if menuStep == 1 { sendAutomated("1") }
             else if menuStep == 2 { sendAutomated("2") }
-            else { sendAutomated("3") }
+            else { restoreStarted = true; sendAutomated("3") }
         } else if operation == .restoreWithBlobs && containsAll(["1. Select Target IPSW", "2. Select SHSH", "3. Start Restore", "4. Back"], in: b) {
             menuStep += 1
             if menuStep == 1 { sendAutomated("1") }
             else if menuStep == 2 { sendAutomated("2") }
-            else { sendAutomated("3") }
+            else { restoreStarted = true; sendAutomated("3") }
         } else if operation == .untethered1033 && containsAll(["1. Select 10.3.3 IPSW", "2. Start Restore", "3. Back"], in: b) {
             menuStep += 1
-            sendAutomated(menuStep == 1 ? "1" : "2")
+            if menuStep == 1 { sendAutomated("1") }
+            else { restoreStarted = true; sendAutomated("2") }
         } else if b.localizedCaseInsensitiveContains("Input the version you'd like to boot:") {
             request(.textInput("Enter the installed tethered iOS version to boot."))
         } else if b.contains("Would you like instructions on how to do this? (y/n):") {
@@ -257,9 +276,9 @@ sudo() { command /usr/bin/sudo -A "$@"; }
 
         if lower.contains("checking for dfu") || lower.contains("instructions will begin") { stage = "Entering DFU mode"; floor = 0.08 }
         if lower.contains("device is pwned") { stage = "Device exploited"; floor = 0.14 }
-        if lower.contains("making new ones") || lower.contains("archive:") { stage = "Building restore image"; floor = 0.20 }
-        if lower.contains("patching") { stage = "Patching firmware"; floor = 0.42 }
-        if lower.contains("adding:") { stage = "Packaging custom IPSW"; floor = 0.53 }
+        if restoreStarted && (lower.contains("making new ones") || lower.contains("archive:")) { stage = "Building restore image"; floor = 0.20 }
+        if restoreStarted && lower.contains("patching") { stage = "Patching firmware"; floor = 0.42 }
+        if restoreStarted && lower.contains("adding:") { stage = "Packaging custom IPSW"; floor = 0.53 }
         if lower.contains("sending ibec") || lower.contains("sending restore ramdisk") { stage = "Starting restore environment"; floor = 0.58 }
         if lower.contains("sending filesystem") || lower.contains("restoring") { stage = "Restoring system"; floor = 0.62 }
         if lower.contains("updating baseband") { stage = "Updating baseband"; floor = 0.82 }
@@ -400,6 +419,9 @@ fi
     }
 
     private func cleanup() {
+        acceptsInput = false
+        outputPipe?.fileHandleForReading.readabilityHandler = nil
+        try? inputPipe?.fileHandleForWriting.close()
         if let url = temporaryScript { try? FileManager.default.removeItem(at: url) }
         if let url = environmentFile { try? FileManager.default.removeItem(at: url) }
         if let url = askpassFile { try? FileManager.default.removeItem(at: url) }
@@ -407,5 +429,7 @@ fi
         environmentFile = nil
         askpassFile = nil
         process = nil
+        inputPipe = nil
+        outputPipe = nil
     }
 }

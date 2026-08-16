@@ -4,6 +4,8 @@ final class RestoreLogWindow: NSWindowController {
     private let textView = NSTextView()
     private var rawLog = ""
     private let renderer = TerminalOutput()
+    private var automaticLogHandle: FileHandle?
+    private(set) var automaticLogURL: URL?
 
     init() {
         let window = NSWindow(
@@ -20,6 +22,10 @@ final class RestoreLogWindow: NSWindowController {
 
     @available(*, unavailable)
     required init?(coder: NSCoder) { nil }
+
+    deinit {
+        try? automaticLogHandle?.close()
+    }
 
     private func buildContent(in window: NSWindow) {
         guard let content = window.contentView else { return }
@@ -60,15 +66,41 @@ final class RestoreLogWindow: NSWindowController {
     }
 
     func clear() {
+        try? automaticLogHandle?.close()
         rawLog = ""
         renderer.clear()
         textView.string = ""
+        beginAutomaticLog()
     }
 
     func append(_ text: String) {
         rawLog += text
+        if let data = text.data(using: .utf8), let handle = automaticLogHandle {
+            do {
+                try handle.write(contentsOf: data)
+            } catch {
+                automaticLogHandle = nil
+            }
+        }
         textView.string = renderer.feed(text)
         textView.scrollToEndOfDocument(nil)
+    }
+
+    private func beginAutomaticLog() {
+        let directory = FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Logs/Surrealra1nGUI", isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let formatter = DateFormatter()
+            formatter.dateFormat = "yyyy-MM-dd-HHmmss"
+            let url = directory.appendingPathComponent("restore-\(formatter.string(from: Date()))-\(UUID().uuidString.prefix(8)).log")
+            FileManager.default.createFile(atPath: url.path, contents: nil)
+            automaticLogHandle = try FileHandle(forWritingTo: url)
+            automaticLogURL = url
+        } catch {
+            automaticLogHandle = nil
+            automaticLogURL = nil
+        }
     }
 
     @objc private func saveLog() {
