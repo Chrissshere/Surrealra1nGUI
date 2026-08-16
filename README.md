@@ -66,6 +66,6 @@ GUI by chrissyx. surrealra1n is maintained by pwnerblu.
 
 Thanks to iSuns9, bodyc1m, Mineek, Remedgit, BatuBey5G, the checkra1n team, and the usbliter8 developers.
 
-## Roadmap
+## Coming soon lol
 
 iOS 17, iOS 18, and iOS 26 experiments, a jailbreak utility for supported downgraded systems, and Cryptex-ticket research are planned work. They are not implemented in this release.
