@@ -67,19 +67,25 @@ final class RestoreSession {
 read() {
     local prompt=""
     local arguments=()
+    local argument_count=0
     while [[ $# -gt 0 ]]; do
         if [[ "$1" == "-p" ]]; then
             shift
             prompt="${1-}"
         else
             arguments+=("$1")
+            argument_count=$((argument_count + 1))
         fi
         shift
     done
     if [[ -n "$prompt" ]]; then
         printf '%s' "$prompt" >&2
     fi
-    builtin read "${arguments[@]}"
+    if [[ $argument_count -gt 0 ]]; then
+        builtin read "${arguments[@]}"
+    else
+        builtin read
+    fi
 }
 sudo() { command /usr/bin/sudo -A "$@"; }
 
