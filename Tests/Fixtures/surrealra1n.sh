@@ -68,7 +68,10 @@ tethered_menu() {
                 echo "Adding: custom.ipsw"
                 echo "Restoring 25%"
                 echo "Restoring 100%"
-                echo "Restore has finished"
+                echo "Restore has completed! Read above if there are any errors"
+                if [[ "${SURREAL_TEST_HELD_PIPE:-}" == "1" ]]; then
+                    sleep 3 &
+                fi
                 return
                 ;;
         esac
@@ -125,3 +128,6 @@ if [[ "${SURREAL_TEST_EARLY_EXIT:-}" == "1" ]]; then
     exit 0
 fi
 restore_menu
+if [[ "${SURREAL_TEST_SUCCESS_EXIT:-}" == "1" ]]; then
+    exit 7
+fi

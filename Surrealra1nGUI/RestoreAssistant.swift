@@ -577,7 +577,10 @@ final class RestoreAssistantController: NSViewController, RestoreSessionDelegate
         let title = heading(success ? "All done" : "The operation stopped")
         let symbol = label(success ? "✓" : "!", size: 62, weight: .bold, color: success ? .systemGreen : .systemRed)
         symbol.alignment = .center
-        let message = label(success ? "surrealra1n finished successfully." : "surrealra1n exited with code \(finishedCode). Open the log for the exact failure.", size: 15, wrapping: true)
+        let successMessage = operation == .tetheredRestore
+            ? "The tethered restore completed successfully. Recovery mode is expected. Choose Just Boot to start the restored system."
+            : "surrealra1n finished successfully."
+        let message = label(success ? successMessage : "surrealra1n exited with code \(finishedCode). Open the log for the exact failure.", size: 15, wrapping: true)
         message.alignment = .center
         [title, symbol, message].forEach(page.addSubview)
         NSLayoutConstraint.activate([
@@ -589,7 +592,7 @@ final class RestoreAssistantController: NSViewController, RestoreSessionDelegate
         auxiliaryButton.isHidden = false
         auxiliaryButton.title = "Show Logs"
         nextButton.isHidden = false
-        nextButton.title = "Done"
+        nextButton.title = success && operation == .tetheredRestore ? "Just Boot" : "Done"
         nextButton.isEnabled = true
     }
 
@@ -642,7 +645,14 @@ final class RestoreAssistantController: NSViewController, RestoreSessionDelegate
         case .finished:
             currentProgress = 0
             currentStage = "Preparing"
-            step = .welcome
+            if finishedCode == 0 && operation == .tetheredRestore {
+                operation = .justBoot
+                selectedBootVersion = nil
+                bootVersions = []
+                step = .bootVersion
+            } else {
+                step = .welcome
+            }
         case .options:
             return
         }

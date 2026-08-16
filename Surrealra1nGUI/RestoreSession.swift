@@ -40,6 +40,7 @@ final class RestoreSession {
     private var dfuPhase = ""
     private var acceptsInput = false
     private var restoreStarted = false
+    private var sawRestoreSuccess = false
 
     var isRunning: Bool { return process?.isRunning == true }
 
@@ -132,6 +133,7 @@ sudo() { command /usr/bin/sudo -A "$@"; }
         dfuPhase = ""
         acceptsInput = true
         restoreStarted = false
+        sawRestoreSuccess = false
 
         output.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
@@ -141,15 +143,12 @@ sudo() { command /usr/bin/sudo -A "$@"; }
         }
         task.terminationHandler = { [weak self] task in
             output.fileHandleForReading.readabilityHandler = nil
-            let remaining = output.fileHandleForReading.readDataToEndOfFile()
             DispatchQueue.main.async {
                 guard let self = self else { return }
                 self.acceptsInput = false
-                if !remaining.isEmpty {
-                    self.consume(String(decoding: remaining, as: UTF8.self), allowAutomation: false)
-                }
+                let status: Int32 = self.sawRestoreSuccess ? 0 : task.terminationStatus
                 self.cleanup()
-                self.delegate?.restoreSession(self, didFinishWith: task.terminationStatus)
+                self.delegate?.restoreSession(self, didFinishWith: status)
             }
         }
 
@@ -191,6 +190,12 @@ sudo() { command /usr/bin/sudo -A "$@"; }
 
     private func consume(_ text: String, allowAutomation: Bool = true) {
         delegate?.restoreSession(self, received: text)
+        let lower = text.lowercased()
+        if lower.contains("status: restore finished")
+            || lower.contains("restore has finished")
+            || lower.contains("restore has completed") {
+            sawRestoreSuccess = true
+        }
         automationBuffer += text.replacingOccurrences(of: "\u{001B}\\[[0-9;?]*[ -/]*[@-~]", with: "", options: .regularExpression)
         if automationBuffer.count > 16_000 {
             automationBuffer = String(automationBuffer.suffix(12_000))
@@ -290,7 +295,7 @@ sudo() { command /usr/bin/sudo -A "$@"; }
         if lower.contains("updating baseband") { stage = "Updating baseband"; floor = 0.82 }
         if lower.contains("fdr") && maximumProgress >= 0.62 { stage = "Finalizing device restore"; floor = 0.88 }
         if lower.contains("sealing system volume") { stage = "Sealing system volume"; floor = 0.95 }
-        if lower.contains("status: restore finished") || lower.contains("restore has finished") { stage = "Restore complete"; floor = 1.0 }
+        if lower.contains("status: restore finished") || lower.contains("restore has finished") || lower.contains("restore has completed") { stage = "Restore complete"; floor = 1.0 }
 
         if maximumProgress >= 0.62,
            let componentProgress = reportedPercentage(in: text) {
