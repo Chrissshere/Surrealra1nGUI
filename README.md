@@ -45,7 +45,7 @@ xcodebuild \
 To create the universal DMG and PKG used for a release:
 
 ```bash
-./scripts/package-release.sh 0.0.3-beta
+./scripts/package-release.sh 0.0.3-beta-rr
 ```
 
 ## Demo mode
