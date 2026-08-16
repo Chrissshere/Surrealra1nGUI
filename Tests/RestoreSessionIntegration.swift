@@ -42,11 +42,12 @@ enum RestoreSessionIntegration {
         }
         let repository = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
         let fixture = repository.appendingPathComponent("Tests/Fixtures/surrealra1n.sh")
-        try run(fixture: fixture, operation: .tetheredRestore, identifier: "iPhone12,3", expected: "Restore has finished", earlyExit: false)
+        try run(fixture: fixture, operation: .tetheredRestore, identifier: "iPhone12,3", expected: "Restore has completed", earlyExit: false)
         try run(fixture: fixture, operation: .restoreWithBlobs, identifier: "iPhone10,6", expected: "Restore has finished", earlyExit: false)
         try run(fixture: fixture, operation: .untethered1033, identifier: "iPhone6,1", expected: "Restore has finished", earlyExit: false)
         try run(fixture: fixture, operation: .justBoot, identifier: "iPhone12,3", expected: "Device should now boot", earlyExit: false)
         try run(fixture: fixture, operation: .tetheredRestore, identifier: "iPhone12,3", expected: "1. Restore (with SHSH blobs)", earlyExit: true)
+        try run(fixture: fixture, operation: .tetheredRestore, identifier: "iPhone12,3", expected: "Restore has completed", earlyExit: false, heldPipe: true, successExit: true)
         print("RestoreSession integration tests passed")
     }
 
@@ -75,7 +76,7 @@ enum RestoreSessionIntegration {
         }
     }
 
-    private static func run(fixture: URL, operation: RestoreOperation, identifier: String, expected: String, earlyExit: Bool) throws {
+    private static func run(fixture: URL, operation: RestoreOperation, identifier: String, expected: String, earlyExit: Bool, heldPipe: Bool = false, successExit: Bool = false) throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("surreal-session-test-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -88,7 +89,13 @@ enum RestoreSessionIntegration {
         FileManager.default.createFile(atPath: blob.path, contents: Data())
 
         if earlyExit { setenv("SURREAL_TEST_EARLY_EXIT", "1", 1) }
-        defer { unsetenv("SURREAL_TEST_EARLY_EXIT") }
+        if heldPipe { setenv("SURREAL_TEST_HELD_PIPE", "1", 1) }
+        if successExit { setenv("SURREAL_TEST_SUCCESS_EXIT", "1", 1) }
+        defer {
+            unsetenv("SURREAL_TEST_EARLY_EXIT")
+            unsetenv("SURREAL_TEST_HELD_PIPE")
+            unsetenv("SURREAL_TEST_SUCCESS_EXIT")
+        }
 
         let session = RestoreSession()
         let recorder = SessionRecorder()
@@ -103,11 +110,15 @@ enum RestoreSessionIntegration {
             operation: operation
         )
 
-        let deadline = Date().addingTimeInterval(8)
+        let started = Date()
+        let deadline = started.addingTimeInterval(8)
         while !recorder.finished && RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.02)) && Date() < deadline {}
         guard recorder.finished else { throw failure("Session timed out", output: recorder.output) }
         guard recorder.status == 0 else { throw failure("Session exited with \(recorder.status)", output: recorder.output) }
         guard recorder.output.contains(expected) else { throw failure("Missing expected output: \(expected)", output: recorder.output) }
+        if heldPipe && Date().timeIntervalSince(started) >= 1.5 {
+            throw failure("Session completion waited for an inherited output pipe", output: recorder.output)
+        }
         if !earlyExit && operation == .tetheredRestore {
             guard recorder.stages.contains(where: { $0.0 == "Restore complete" && $0.1 == 1 }) else {
                 throw failure("Restore progress did not complete", output: recorder.output)
