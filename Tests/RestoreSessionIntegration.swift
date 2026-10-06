@@ -46,7 +46,9 @@ enum RestoreSessionIntegration {
         try run(fixture: fixture, operation: .restoreWithBlobs, identifier: "iPhone10,6", expected: "Restore has finished", earlyExit: false)
         try run(fixture: fixture, operation: .untethered1033, identifier: "iPhone6,1", expected: "Restore has finished", earlyExit: false)
         try run(fixture: fixture, operation: .justBoot, identifier: "iPhone12,3", expected: "Device should now boot", earlyExit: false)
-        try run(fixture: fixture, operation: .tetheredRestore, identifier: "iPhone12,3", expected: "1. Restore (with SHSH blobs)", earlyExit: true)
+        // The background menu may write after its parent exits; only require output
+        // consumed before the GUI responds to the parent's final Enter prompt.
+        try run(fixture: fixture, operation: .tetheredRestore, identifier: "iPhone12,3", expected: "A12/A13 device support is entirely experimental.", earlyExit: true)
         try run(fixture: fixture, operation: .tetheredRestore, identifier: "iPhone12,3", expected: "Restore has completed", earlyExit: false, heldPipe: true, successExit: true)
         print("RestoreSession integration tests passed")
     }
@@ -64,6 +66,7 @@ enum RestoreSessionIntegration {
     private static func testLogWindow() throws {
         let log = RestoreLogWindow()
         log.clear()
+        let firstURL = log.automaticLogURL
         log.append("Starting\rPatching\n\u{001B}[2KRestore 54%\n")
         log.present()
         log.window?.close()
@@ -71,8 +74,23 @@ enum RestoreSessionIntegration {
         log.window?.orderOut(nil)
         guard let url = log.automaticLogURL,
               let contents = try? String(contentsOf: url, encoding: .utf8),
-              contents.contains("Restore 54%") else {
+              contents.contains("Restore 54%"),
+              contents.contains("surrealra1n GUI"),
+              contents.contains("macOS:"),
+              contents.contains("Session started:") else {
             throw failure("Automatic restore log was not written", output: "")
+        }
+        log.clear()
+        log.append("Second session\n")
+        guard let secondURL = log.automaticLogURL,
+              secondURL != firstURL,
+              let contents = try? String(contentsOf: secondURL, encoding: .utf8),
+              contents.contains("Second session"),
+              !contents.contains("Restore 54%"),
+              let firstContents = try? String(contentsOf: url, encoding: .utf8),
+              firstContents.contains("Restore 54%"),
+              !firstContents.contains("Second session") else {
+            throw failure("Restore sessions did not keep separate logs", output: "")
         }
     }
 

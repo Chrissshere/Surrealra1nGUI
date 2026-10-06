@@ -58,10 +58,12 @@ final class SurrealApplication: NSObject, NSApplicationDelegate {
     }
 
     @objc private func showAboutPanel() {
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "development"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "development"
         NSApp.orderFrontStandardAboutPanel(options: [
             .applicationName: "surrealra1n",
-            .applicationVersion: "0.0.3 beta re-release 2",
-            .version: "Build 6",
+            .applicationVersion: version,
+            .version: "Build \(build)",
             .credits: NSAttributedString(string: "GUI by chrissyx\nsurrealra1n by pwnerblu")
         ])
     }

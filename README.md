@@ -2,7 +2,11 @@
 
 surrealra1n GUI is a native macOS front end for [surrealra1n](https://github.com/pwnerblu/surrealra1n). It follows the same restore flow as the shell script, but presents device detection, firmware selection, DFU instructions, progress, and logs in a small AppKit wizard.
 
-This is beta software. A restore can erase the connected device, and tethered installations need Just Boot after every shutdown. Keep a backup and read the log before retrying a failed restore.
+A restore can erase the connected device, and tethered installations need Just Boot after every shutdown. Keep a backup and read the log before retrying a failed restore.
+
+## 0.0.4
+
+The log window now includes **Show in Finder** to locate the current session's saved log. Each log includes the GUI version, build number, macOS version, and session start time to help investigate bug reports. The About panel reads the version and build from the app bundle.
 
 ## Requirements
 
@@ -21,6 +25,8 @@ The release is universal and contains native `x86_64` and `arm64` code.
 The app downloads a fresh copy of the surrealra1n development branch for each session. The archive is unpacked in a temporary directory and removed when the app quits. The downloaded repository is left untouched; the GUI runs a temporary copy of the script with the selected IPSW, SHSH, and boot version supplied through environment variables.
 
 Restore output is shown live on the progress screen and in a separate log window. Generated restore files and bootchains are kept in Application Support, so they survive between sessions. The bootchain location can be changed from Options, and an existing bootchain folder can be imported from the Just Boot screen.
+
+Session logs are automatically saved in `~/Library/Logs/Surrealra1nGUI`. Open the log window and choose **Show in Finder** to locate the current log, or **Save Log…** to export a copy. Review logs before sharing them; restore output can include local file paths and device details.
 
 SHSH restore is disabled for A12 and A13 devices. The GUI follows the same limitation as the underlying script rather than offering an option that cannot work.
 
@@ -45,7 +51,7 @@ xcodebuild \
 To create the universal DMG and PKG used for a release:
 
 ```bash
-./scripts/package-release.sh 0.0.3-beta-rr2
+./scripts/package-release.sh 0.0.4
 ```
 
 ## Demo mode

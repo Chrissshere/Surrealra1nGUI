@@ -3,7 +3,7 @@
 set -euo pipefail
 
 ROOT_DIR=$(cd "$(dirname "$0")/.." && pwd)
-VERSION=${1:-0.0.3-beta-rr2}
+VERSION=${1:-0.0.4}
 BUILD_ROOT=$(mktemp -d /tmp/surrealra1n-package.XXXXXX)
 DERIVED_DATA="$BUILD_ROOT/DerivedData"
 APP_PATH="$DERIVED_DATA/Build/Products/Release/surrealra1n.app"
@@ -28,6 +28,7 @@ xcodebuild \
     ARCHS="arm64 x86_64" \
     ONLY_ACTIVE_ARCH=NO \
     CODE_SIGNING_ALLOWED=NO \
+    MARKETING_VERSION="${VERSION%%-*}" \
     build
 
 codesign --force --deep --sign - "$APP_PATH"

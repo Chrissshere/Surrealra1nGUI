@@ -2,6 +2,7 @@ import Cocoa
 
 final class RestoreLogWindow: NSWindowController {
     private let textView = NSTextView()
+    private let revealButton = NSButton(title: "Show in Finder", target: nil, action: nil)
     private var rawLog = ""
     private let renderer = TerminalOutput()
     private var automaticLogHandle: FileHandle?
@@ -56,6 +57,14 @@ final class RestoreLogWindow: NSWindowController {
         save.frame = NSRect(x: 650, y: 9, width: 94, height: 29)
         save.autoresizingMask = [.minXMargin, .maxYMargin]
         content.addSubview(save)
+
+        revealButton.target = self
+        revealButton.action = #selector(revealLog)
+        revealButton.font = InterfaceTheme.button
+        revealButton.frame = NSRect(x: 10, y: 9, width: 120, height: 29)
+        revealButton.autoresizingMask = [.maxXMargin, .maxYMargin]
+        revealButton.isEnabled = false
+        content.addSubview(revealButton)
     }
 
     func present() {
@@ -67,10 +76,16 @@ final class RestoreLogWindow: NSWindowController {
 
     func clear() {
         try? automaticLogHandle?.close()
+        automaticLogHandle = nil
+        automaticLogURL = nil
+        revealButton.isEnabled = false
         rawLog = ""
         renderer.clear()
         textView.string = ""
         beginAutomaticLog()
+        let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "development"
+        let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "development"
+        append("surrealra1n GUI \(version) (build \(build))\nmacOS: \(ProcessInfo.processInfo.operatingSystemVersionString)\nSession started: \(ISO8601DateFormatter().string(from: Date()))\n\n")
     }
 
     func append(_ text: String) {
@@ -79,6 +94,7 @@ final class RestoreLogWindow: NSWindowController {
             do {
                 try handle.write(contentsOf: data)
             } catch {
+                try? handle.close()
                 automaticLogHandle = nil
             }
         }
@@ -97,10 +113,16 @@ final class RestoreLogWindow: NSWindowController {
             FileManager.default.createFile(atPath: url.path, contents: nil)
             automaticLogHandle = try FileHandle(forWritingTo: url)
             automaticLogURL = url
+            revealButton.isEnabled = true
         } catch {
             automaticLogHandle = nil
             automaticLogURL = nil
         }
+    }
+
+    @objc private func revealLog() {
+        guard let url = automaticLogURL else { return }
+        NSWorkspace.shared.activateFileViewerSelecting([url])
     }
 
     @objc private func saveLog() {
