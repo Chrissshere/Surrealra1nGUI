@@ -1,0 +1,97 @@
+name: Build macOS release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Release version (for example: 0.0.3-beta-rr2)"
+        required: true
+        type: string
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Package and publish
+    runs-on: macos-latest
+    timeout-minutes: 30
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Resolve release version
+        id: release
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_VERSION: ${{ inputs.version }}
+          REF_NAME: ${{ github.ref_name }}
+        run: |
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            version="$INPUT_VERSION"
+            tag="v$version"
+          else
+            tag="$REF_NAME"
+            version="${tag#v}"
+          fi
+
+          if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([.-][0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]; then
+            echo "Invalid release version: $version" >&2
+            exit 1
+          fi
+
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+
+      - name: Build universal DMG and PKG
+        run: ./scripts/package-release.sh "${{ steps.release.outputs.version }}"
+
+      - name: Create checksums
+        shell: bash
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          cd dist
+          shasum -a 256 \
+            "surrealra1n-$VERSION-macOS-universal.dmg" \
+            "surrealra1n-$VERSION-macOS-universal.pkg" \
+            > SHA256SUMS.txt
+
+      - name: Publish GitHub release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.release.outputs.version }}
+          RELEASE_TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          assets=(
+            "dist/surrealra1n-$VERSION-macOS-universal.dmg"
+            "dist/surrealra1n-$VERSION-macOS-universal.pkg"
+            "dist/SHA256SUMS.txt"
+          )
+
+          if gh release view "$RELEASE_TAG" > /dev/null 2>&1; then
+            gh release upload "$RELEASE_TAG" "${assets[@]}" --clobber
+            exit 0
+          fi
+
+          release_flags=()
+          if [[ "$VERSION" == *-* ]]; then
+            release_flags+=(--prerelease)
+          fi
+
+          gh release create "$RELEASE_TAG" \
+            "${assets[@]}" \
+            --target "$GITHUB_SHA" \
+            --title "surrealra1n $VERSION" \
+            --generate-notes \
+            "${release_flags[@]}"
