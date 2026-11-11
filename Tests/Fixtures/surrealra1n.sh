@@ -4,6 +4,16 @@ set -u
 IDENTIFIER="iPhone12,3"
 ECID="1234"
 
+if [[ "${SURREAL_TEST_PACKAGE_MANAGER_PROMPT:-}" == "1" ]]; then
+    echo "Using Homebrew"
+    read -r -p "Use MacPorts instead? [y/n] " response
+    case "$response" in
+        y) printf '\nPackage manager choice: MacPorts\n' ;;
+        n) printf '\nPackage manager choice: Homebrew\n' ;;
+        *) exit 45 ;;
+    esac
+fi
+
 pick_file() {
     echo "$2"
 }

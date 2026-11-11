@@ -4,6 +4,10 @@ surrealra1n GUI is a native macOS front end for [surrealra1n](https://github.com
 
 A restore can erase the connected device, and tethered installations need Just Boot after every shutdown. Keep a backup and read the log before retrying a failed restore.
 
+## 0.0.5
+
+When surrealra1n asks whether to switch to MacPorts, the progress screen now shows **Keep Homebrew** and **Use MacPorts**. This fixes a stall at 1% on Macs with both package managers installed.
+
 ## 0.0.4
 
 The log window now includes **Show in Finder** to locate the current session's saved log. Each log includes the GUI version, build number, macOS version, and session start time to help investigate bug reports. The About panel reads the version and build from the app bundle.
@@ -51,7 +55,7 @@ xcodebuild \
 To create the universal DMG and PKG used for a release:
 
 ```bash
-./scripts/package-release.sh 0.0.4
+./scripts/package-release.sh 0.0.5
 ```
 
 ## Demo mode

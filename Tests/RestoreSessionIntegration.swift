@@ -7,6 +7,13 @@ final class SessionRecorder: RestoreSessionDelegate {
     var finished = false
     var status: Int32 = -999
 
+    var isChoosingPackageManager: Bool {
+        prompts.contains { prompt in
+            if case .packageManager = prompt { return true }
+            return false
+        }
+    }
+
     func restoreSession(_ session: RestoreSession, received text: String) {
         output += text
     }
@@ -18,6 +25,7 @@ final class SessionRecorder: RestoreSessionDelegate {
     func restoreSession(_ session: RestoreSession, requests prompt: RestorePrompt) {
         prompts.append(prompt)
         switch prompt {
+        case .packageManager: break
         case .rebuildFiles: session.respond("y")
         case .yesNo: session.respond("y")
         case .continueOnly, .recoveryReady, .pwnedReady: session.respond("")
@@ -42,6 +50,8 @@ enum RestoreSessionIntegration {
         }
         let repository = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
         let fixture = repository.appendingPathComponent("Tests/Fixtures/surrealra1n.sh")
+        try run(fixture: fixture, operation: .tetheredRestore, identifier: "iPhone12,3", expected: "Package manager choice: Homebrew", earlyExit: false, packageManagerReply: "n")
+        try run(fixture: fixture, operation: .tetheredRestore, identifier: "iPhone12,3", expected: "Package manager choice: MacPorts", earlyExit: false, packageManagerReply: "y")
         try run(fixture: fixture, operation: .tetheredRestore, identifier: "iPhone12,3", expected: "Restore has completed", earlyExit: false)
         try run(fixture: fixture, operation: .restoreWithBlobs, identifier: "iPhone10,6", expected: "Restore has finished", earlyExit: false)
         try run(fixture: fixture, operation: .untethered1033, identifier: "iPhone6,1", expected: "Restore has finished", earlyExit: false)
@@ -94,7 +104,7 @@ enum RestoreSessionIntegration {
         }
     }
 
-    private static func run(fixture: URL, operation: RestoreOperation, identifier: String, expected: String, earlyExit: Bool, heldPipe: Bool = false, successExit: Bool = false) throws {
+    private static func run(fixture: URL, operation: RestoreOperation, identifier: String, expected: String, earlyExit: Bool, heldPipe: Bool = false, successExit: Bool = false, packageManagerReply: String? = nil) throws {
         let root = FileManager.default.temporaryDirectory.appendingPathComponent("surreal-session-test-\(UUID().uuidString)")
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         defer { try? FileManager.default.removeItem(at: root) }
@@ -109,13 +119,16 @@ enum RestoreSessionIntegration {
         if earlyExit { setenv("SURREAL_TEST_EARLY_EXIT", "1", 1) }
         if heldPipe { setenv("SURREAL_TEST_HELD_PIPE", "1", 1) }
         if successExit { setenv("SURREAL_TEST_SUCCESS_EXIT", "1", 1) }
+        if packageManagerReply != nil { setenv("SURREAL_TEST_PACKAGE_MANAGER_PROMPT", "1", 1) }
         defer {
             unsetenv("SURREAL_TEST_EARLY_EXIT")
             unsetenv("SURREAL_TEST_HELD_PIPE")
             unsetenv("SURREAL_TEST_SUCCESS_EXIT")
+            unsetenv("SURREAL_TEST_PACKAGE_MANAGER_PROMPT")
         }
 
         let session = RestoreSession()
+        defer { if session.isRunning { session.cancel() } }
         let recorder = SessionRecorder()
         session.delegate = recorder
         try session.start(
@@ -130,6 +143,15 @@ enum RestoreSessionIntegration {
 
         let started = Date()
         let deadline = started.addingTimeInterval(8)
+        if let packageManagerReply = packageManagerReply {
+            while !recorder.isChoosingPackageManager && !recorder.finished && Date() < deadline
+                && RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.02)) {}
+            guard recorder.isChoosingPackageManager, session.isRunning,
+                  !recorder.output.contains("Package manager choice:") else {
+                throw failure("Session did not wait for a package manager choice", output: recorder.output)
+            }
+            session.respond(packageManagerReply)
+        }
         while !recorder.finished && RunLoop.current.run(mode: .default, before: Date().addingTimeInterval(0.02)) && Date() < deadline {}
         guard recorder.finished else { throw failure("Session timed out", output: recorder.output) }
         guard recorder.status == 0 else { throw failure("Session exited with \(recorder.status)", output: recorder.output) }

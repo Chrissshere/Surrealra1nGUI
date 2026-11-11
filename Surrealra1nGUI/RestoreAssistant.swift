@@ -420,6 +420,10 @@ final class RestoreAssistantController: NSViewController, RestoreSessionDelegate
     }
 
     private func renderHandoff() {
+        if isChoosingPackageManager {
+            renderRunning()
+            return
+        }
         let phone = phoneArtwork(named: dfuProfile.assetName)
         let title = heading(handoffTitle)
         let instructions = label(handoffInstructions, size: 14, color: NSColor(calibratedWhite: 0.86, alpha: 1), wrapping: true)
@@ -459,7 +463,7 @@ final class RestoreAssistantController: NSViewController, RestoreSessionDelegate
 
     private func renderRunning() {
         let title = heading(operation == .justBoot ? "Booting device…" : "Restoring device…")
-        let stage = label(currentStage, size: 13, weight: .semibold, wrapping: true)
+        let stage = label(isChoosingPackageManager ? handoffTitle : currentStage, size: 13, weight: .semibold, wrapping: true)
         let percent = label("\(Int((currentProgress * 100).rounded()))%", size: 12, weight: .semibold)
         percent.font = InterfaceTheme.percentage
         percent.alignment = .right
@@ -494,13 +498,29 @@ final class RestoreAssistantController: NSViewController, RestoreSessionDelegate
         scroll.documentView = console
         liveConsoleView = console
         [title, stage, percent, progress, scroll].forEach(page.addSubview)
+        var consoleTop = progress.bottomAnchor
+        if isChoosingPackageManager {
+            let homebrew = actionButton("Keep Homebrew", action: #selector(keepHomebrew))
+            let macPorts = actionButton("Use MacPorts", action: #selector(useMacPorts))
+            let choices = NSStackView(views: [homebrew, macPorts])
+            choices.orientation = .horizontal
+            choices.alignment = .centerY
+            choices.spacing = 8
+            choices.translatesAutoresizingMaskIntoConstraints = false
+            page.addSubview(choices)
+            NSLayoutConstraint.activate([
+                choices.leadingAnchor.constraint(equalTo: title.leadingAnchor),
+                choices.topAnchor.constraint(equalTo: progress.bottomAnchor, constant: 9)
+            ])
+            consoleTop = choices.bottomAnchor
+        }
         NSLayoutConstraint.activate([
             title.leadingAnchor.constraint(equalTo: page.leadingAnchor, constant: 12), title.topAnchor.constraint(equalTo: page.topAnchor, constant: 5),
             stage.leadingAnchor.constraint(equalTo: title.leadingAnchor), stage.trailingAnchor.constraint(equalTo: percent.leadingAnchor, constant: -12), stage.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 10),
             percent.trailingAnchor.constraint(equalTo: page.trailingAnchor, constant: -24), percent.firstBaselineAnchor.constraint(equalTo: stage.firstBaselineAnchor), percent.widthAnchor.constraint(equalToConstant: 42),
             progress.leadingAnchor.constraint(equalTo: title.leadingAnchor), progress.trailingAnchor.constraint(equalTo: percent.trailingAnchor), progress.topAnchor.constraint(equalTo: stage.bottomAnchor, constant: 12),
             scroll.leadingAnchor.constraint(equalTo: title.leadingAnchor), scroll.trailingAnchor.constraint(equalTo: percent.trailingAnchor),
-            scroll.topAnchor.constraint(equalTo: progress.bottomAnchor, constant: 9), scroll.bottomAnchor.constraint(equalTo: page.bottomAnchor, constant: -2)
+            scroll.topAnchor.constraint(equalTo: consoleTop, constant: 9), scroll.bottomAnchor.constraint(equalTo: page.bottomAnchor, constant: -2)
         ])
         console.scrollToEndOfDocument(nil)
         backButton.isHidden = true
@@ -637,7 +657,7 @@ final class RestoreAssistantController: NSViewController, RestoreSessionDelegate
             beginOperation()
             return
         case .handoff:
-            answerPrompt(positive: true)
+            if isChoosingPackageManager { confirmCancel() } else { answerPrompt(positive: true) }
             return
         case .running, .dfuSequence:
             confirmCancel()
@@ -866,6 +886,16 @@ final class RestoreAssistantController: NSViewController, RestoreSessionDelegate
         }
     }
 
+    @objc private func keepHomebrew() {
+        guard isChoosingPackageManager else { return }
+        answerPrompt(positive: false)
+    }
+
+    @objc private func useMacPorts() {
+        guard isChoosingPackageManager else { return }
+        answerPrompt(positive: true)
+    }
+
     private func answerPrompt(positive: Bool) {
         guard let prompt = currentPrompt else { return }
         let textResponse = promptTextField?.stringValue.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
@@ -877,7 +907,7 @@ final class RestoreAssistantController: NSViewController, RestoreSessionDelegate
             case .pwnedReady:
                 appendLog("Device is pwned!\n")
                 continueDemoAfterPwn()
-            case .textInput:
+            case .packageManager, .textInput:
                 showDemoPrompt(.recoveryReady, after: 0.35)
             case .rebuildFiles, .yesNo(_), .continueOnly(_):
                 startDemoOperationProgress()
@@ -886,7 +916,7 @@ final class RestoreAssistantController: NSViewController, RestoreSessionDelegate
         }
         if positive {
             switch prompt {
-            case .rebuildFiles, .yesNo: restoreSession.respond("y")
+            case .packageManager, .rebuildFiles, .yesNo: restoreSession.respond("y")
             case .textInput: restoreSession.respond(textResponse)
             default: restoreSession.respond("")
             }
@@ -1023,8 +1053,14 @@ final class RestoreAssistantController: NSViewController, RestoreSessionDelegate
         demoTimer = Timer.scheduledTimer(withTimeInterval: delay, repeats: false) { _ in action() }
     }
 
+    private var isChoosingPackageManager: Bool {
+        if case .packageManager = currentPrompt { return true }
+        return false
+    }
+
     private var handoffTitle: String {
         switch currentPrompt {
+        case .packageManager: return "Choose a package manager to continue"
         case .recoveryReady: return "Put the device into Recovery"
         case .pwnedReady: return "Pwn the device with usbliter8"
         case .rebuildFiles: return "Restore files already exist"
@@ -1047,7 +1083,7 @@ final class RestoreAssistantController: NSViewController, RestoreSessionDelegate
             return message
         case .textInput(let message):
             return message
-        case .none:
+        case .packageManager, .none:
             return "Follow the instructions before continuing."
         }
     }

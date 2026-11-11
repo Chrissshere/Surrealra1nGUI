@@ -8,6 +8,7 @@ enum RestoreOperation {
 }
 
 enum RestorePrompt {
+    case packageManager
     case recoveryReady
     case pwnedReady
     case rebuildFiles
@@ -211,7 +212,9 @@ sudo() { command /usr/bin/sudo -A "$@"; }
         guard !awaitingUser else { return }
         let b = automationBuffer
 
-        if b.contains("Would you like to update now? (y/n):") {
+        if b.trimmingCharacters(in: .whitespacesAndNewlines).hasSuffix("Use MacPorts instead? [y/n]") {
+            request(.packageManager)
+        } else if b.contains("Would you like to update now? (y/n):") {
             sendAutomated("n")
         } else if containsAll(["1. Downgrade Options", "2. Misc Utilities", "4. Exit"], in: b) {
             sendAutomated("1")
