@@ -13,4 +13,5 @@ enum InterfaceTheme {
     static let button = NSFont.systemFont(ofSize: 13, weight: .regular)
     static let primaryButton = NSFont.systemFont(ofSize: 13, weight: .bold)
     static let percentage = NSFont.monospacedDigitSystemFont(ofSize: 12, weight: .semibold)
+    static let console = NSFont.monospacedSystemFont(ofSize: 11, weight: .regular)
 }

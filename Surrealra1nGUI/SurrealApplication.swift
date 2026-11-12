@@ -1,7 +1,7 @@
 import Cocoa
 
 @main
-final class SurrealApplication: NSObject, NSApplicationDelegate {
+final class SurrealApplication: NSObject, NSApplicationDelegate, NSWindowDelegate {
     private var window: NSWindow!
     private var restoreAssistant: RestoreAssistantController!
 
@@ -21,22 +21,24 @@ final class SurrealApplication: NSObject, NSApplicationDelegate {
         configureMainMenu()
 
         restoreAssistant = RestoreAssistantController()
+        let size = RestoreAssistantController.initialContentSize
         window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 480, height: 326),
-            styleMask: [.titled, .closable, .miniaturizable],
+            contentRect: NSRect(origin: .zero, size: size),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable],
             backing: .buffered,
             defer: false
         )
         window.title = "surrealra1n"
         window.titleVisibility = .visible
         window.backgroundColor = NSColor(srgbRed: 60.0 / 255.0, green: 59.0 / 255.0, blue: 57.0 / 255.0, alpha: 1)
-        window.isMovableByWindowBackground = true
-        window.minSize = NSSize(width: 480, height: 348)
-        window.maxSize = NSSize(width: 480, height: 348)
-        window.center()
+        window.isReleasedWhenClosed = false
+        window.delegate = self
+        window.contentMinSize = RestoreAssistantController.minimumContentSize
         window.contentViewController = restoreAssistant
+        window.center()
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
+        restoreAssistant.startMonitoring()
     }
 
     private func configureMainMenu() {
@@ -54,7 +56,32 @@ final class SurrealApplication: NSObject, NSApplicationDelegate {
         applicationMenu.addItem(withTitle: "Show All", action: #selector(NSApplication.unhideAllApplications(_:)), keyEquivalent: "")
         applicationMenu.addItem(.separator())
         applicationMenu.addItem(withTitle: "Quit surrealra1n", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+
+        let windowItem = NSMenuItem(title: "Window", action: nil, keyEquivalent: "")
+        let windowMenu = NSMenu(title: "Window")
+        let showRestore = windowMenu.addItem(withTitle: "Show Restore Window", action: #selector(showRestoreWindow), keyEquivalent: "")
+        showRestore.target = self
+        windowItem.submenu = windowMenu
+        menuBar.addItem(windowItem)
         NSApp.mainMenu = menuBar
+        NSApp.windowsMenu = windowMenu
+    }
+
+    @objc private func showRestoreWindow() {
+        guard let window else { return }
+        if window.isMiniaturized { window.deminiaturize(nil) }
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        showRestoreWindow()
+        return false
+    }
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        guard sender === window, restoreAssistant.hasRunningOperation else { return true }
+        restoreAssistant.requestCancel()
+        return false
     }
 
     @objc private func showAboutPanel() {

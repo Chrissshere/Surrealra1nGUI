@@ -1,12 +1,15 @@
 import Cocoa
 
 final class RestoreLogWindow: NSWindowController {
-    private let textView = NSTextView()
+    private let transcript = LogTranscriptView(background: NSColor(calibratedWhite: 0.035, alpha: 1))
     private let revealButton = NSButton(title: "Show in Finder", target: nil, action: nil)
     private var rawLog = ""
     private let renderer = TerminalOutput()
+    private var displayRefreshPending = false
     private var automaticLogHandle: FileHandle?
     private(set) var automaticLogURL: URL?
+    var onDisplayUpdate: ((String) -> Void)?
+    var displayText: String { renderer.text }
 
     init() {
         let window = NSWindow(
@@ -17,6 +20,7 @@ final class RestoreLogWindow: NSWindowController {
         )
         window.title = "surrealra1n Log"
         window.isReleasedWhenClosed = false
+        window.contentMinSize = NSSize(width: 340, height: 220)
         super.init(window: window)
         buildContent(in: window)
     }
@@ -31,40 +35,26 @@ final class RestoreLogWindow: NSWindowController {
     private func buildContent(in window: NSWindow) {
         guard let content = window.contentView else { return }
 
-        let scroll = NSScrollView(frame: NSRect(x: 0, y: 46, width: 760, height: 414))
-        scroll.autoresizingMask = [.width, .height]
-        scroll.hasVerticalScroller = true
-        scroll.documentView = textView
-
-        textView.frame = scroll.contentView.bounds
-        textView.minSize = .zero
-        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
-        textView.isVerticallyResizable = true
-        textView.isHorizontallyResizable = false
-        textView.autoresizingMask = [.width]
-        textView.textContainer?.containerSize = NSSize(width: scroll.contentSize.width, height: CGFloat.greatestFiniteMagnitude)
-        textView.textContainer?.widthTracksTextView = true
-        textView.isEditable = false
-        textView.isSelectable = true
-        textView.backgroundColor = NSColor(calibratedWhite: 0.035, alpha: 1)
-        textView.textColor = NSColor(calibratedRed: 0.76, green: 0.84, blue: 0.91, alpha: 1)
-        textView.font = NSFont(name: "Menlo", size: 10.5) ?? .monospacedSystemFont(ofSize: 10.5, weight: .regular)
-        textView.textContainerInset = NSSize(width: 10, height: 10)
-        content.addSubview(scroll)
-
         let save = NSButton(title: "Save Log…", target: self, action: #selector(saveLog))
         save.font = InterfaceTheme.button
-        save.frame = NSRect(x: 650, y: 9, width: 94, height: 29)
-        save.autoresizingMask = [.minXMargin, .maxYMargin]
-        content.addSubview(save)
-
         revealButton.target = self
         revealButton.action = #selector(revealLog)
         revealButton.font = InterfaceTheme.button
-        revealButton.frame = NSRect(x: 10, y: 9, width: 120, height: 29)
-        revealButton.autoresizingMask = [.maxXMargin, .maxYMargin]
         revealButton.isEnabled = false
-        content.addSubview(revealButton)
+        [transcript, save, revealButton].forEach { item in
+            item.translatesAutoresizingMaskIntoConstraints = false
+            content.addSubview(item)
+        }
+        NSLayoutConstraint.activate([
+            transcript.topAnchor.constraint(equalTo: content.topAnchor),
+            transcript.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            transcript.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            transcript.bottomAnchor.constraint(equalTo: save.topAnchor, constant: -10),
+            save.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -14),
+            save.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -10),
+            revealButton.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 14),
+            revealButton.centerYAnchor.constraint(equalTo: save.centerYAnchor)
+        ])
     }
 
     func present() {
@@ -72,6 +62,7 @@ final class RestoreLogWindow: NSWindowController {
         if !window.isVisible { window.center() }
         showWindow(nil)
         window.makeKeyAndOrderFront(nil)
+        transcript.showText(displayText)
     }
 
     func clear() {
@@ -81,7 +72,7 @@ final class RestoreLogWindow: NSWindowController {
         revealButton.isEnabled = false
         rawLog = ""
         renderer.clear()
-        textView.string = ""
+        transcript.showText("", reset: true)
         beginAutomaticLog()
         let version = Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "development"
         let build = Bundle.main.object(forInfoDictionaryKey: "CFBundleVersion") as? String ?? "development"
@@ -98,8 +89,22 @@ final class RestoreLogWindow: NSWindowController {
                 automaticLogHandle = nil
             }
         }
-        textView.string = renderer.feed(text)
-        textView.scrollToEndOfDocument(nil)
+        renderer.append(text)
+        scheduleDisplayRefresh()
+    }
+
+    private func scheduleDisplayRefresh() {
+        guard !displayRefreshPending else { return }
+        displayRefreshPending = true
+        DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(80)) { [weak self] in
+            guard let self else { return }
+            self.displayRefreshPending = false
+            let logVisible = self.window?.isVisible == true
+            guard logVisible || self.onDisplayUpdate != nil else { return }
+            let text = self.displayText
+            if logVisible { self.transcript.showText(text) }
+            self.onDisplayUpdate?(text)
+        }
     }
 
     private func beginAutomaticLog() {
@@ -142,34 +147,92 @@ final class RestoreLogWindow: NSWindowController {
     }
 }
 
+final class LogTranscriptView: NSScrollView {
+    private let textView = NSTextView()
+
+    init(background: NSColor) {
+        super.init(frame: .zero)
+        hasVerticalScroller = true
+        autohidesScrollers = true
+        drawsBackground = true
+        backgroundColor = background
+
+        textView.frame = NSRect(origin: .zero, size: contentSize)
+        textView.minSize = .zero
+        textView.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        textView.autoresizingMask = [.width]
+        textView.textContainer?.containerSize = NSSize(width: contentSize.width, height: CGFloat.greatestFiniteMagnitude)
+        textView.textContainer?.widthTracksTextView = true
+        textView.textContainer?.lineBreakMode = .byCharWrapping
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.isRichText = false
+        textView.backgroundColor = background
+        textView.textColor = NSColor(calibratedWhite: 0.88, alpha: 1)
+        textView.font = InterfaceTheme.console
+        textView.textContainerInset = NSSize(width: 10, height: 8)
+        documentView = textView
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { nil }
+
+    func showText(_ text: String, reset: Bool = false) {
+        guard reset || textView.string != text else { return }
+        let offset = contentView.bounds.origin
+        let selection = textView.selectedRange()
+        let followsTail = reset || (selection.length == 0 && textView.bounds.maxY <= documentVisibleRect.maxY + 20)
+        textView.string = text
+        if followsTail {
+            textView.scrollToEndOfDocument(nil)
+        } else {
+            if selection.location != NSNotFound && NSMaxRange(selection) <= (text as NSString).length {
+                textView.setSelectedRange(selection)
+            }
+            contentView.scroll(to: offset)
+            reflectScrolledClipView(contentView)
+        }
+    }
+}
+
 final class TerminalOutput {
     private enum EscapeState { case normal, escape, csi, osc, oscEscape }
     private var escapeState: EscapeState = .normal
     private var committed = ""
+    private var committedLength = 0
     private var line: [Character] = []
     private var cursor = 0
     private var csiParameters = ""
-    private let visibleLimit = 500_000
+    private let visibleLimit = 160_000
+
+    var text: String {
+        let remaining = max(0, visibleLimit - line.count)
+        let history = committedLength <= remaining ? committed : String(committed.suffix(remaining))
+        return history + String(line.suffix(visibleLimit))
+    }
 
     func clear() {
         escapeState = .normal
         committed = ""
+        committedLength = 0
         line = []
         cursor = 0
         csiParameters = ""
     }
 
-    func feed(_ input: String) -> String {
+    func append(_ input: String) {
         for character in input {
             if consumeEscape(character) { continue }
             switch character {
             case "\r":
                 cursor = 0
-            case "\n":
+            case "\n", "\r\n":
                 committed += String(line) + "\n"
+                committedLength += line.count + 1
                 line.removeAll(keepingCapacity: true)
                 cursor = 0
-                trimIfNeeded()
             case "\u{0008}":
                 if cursor > 0 {
                     cursor -= 1
@@ -182,7 +245,7 @@ final class TerminalOutput {
                 cursor += 1
             }
         }
-        return committed + String(line)
+        trimIfNeeded()
     }
 
     private func consumeEscape(_ character: Character) -> Bool {
@@ -232,10 +295,8 @@ final class TerminalOutput {
     }
 
     private func trimIfNeeded() {
-        guard committed.count > visibleLimit else { return }
-        let start = committed.index(committed.endIndex, offsetBy: -visibleLimit)
-        let suffix = String(committed[start...])
-        if let newline = suffix.firstIndex(of: "\n") { committed = String(suffix[suffix.index(after: newline)...]) }
-        else { committed = suffix }
+        guard committedLength > visibleLimit + 16_384 else { return }
+        committed = String(committed.suffix(visibleLimit))
+        committedLength = committed.count
     }
 }

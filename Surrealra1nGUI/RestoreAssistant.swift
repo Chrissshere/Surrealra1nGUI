@@ -2,6 +2,9 @@ import Cocoa
 import UniformTypeIdentifiers
 
 final class RestoreAssistantController: NSViewController, RestoreSessionDelegate {
+    static let initialContentSize = NSSize(width: 600, height: 440)
+    static let minimumContentSize = NSSize(width: 540, height: 400)
+
     private enum Step {
         case welcome, options, operation, firmware, bootVersion, ready, handoff, dfuSequence, running, finished
     }
@@ -21,9 +24,6 @@ final class RestoreAssistantController: NSViewController, RestoreSessionDelegate
     private var currentPrompt: RestorePrompt?
     private var currentStage = "Preparing"
     private var currentProgress = 0.0
-    private var currentOutputLine = "Waiting for surrealra1n output…"
-    private var liveTranscript = ""
-    private let inlineLogRenderer = TerminalOutput()
     private var finishedCode: Int32 = 0
     private var engineStatus = "Preparing surrealra1n…"
     private var engineDownloadFailed = false
@@ -31,6 +31,7 @@ final class RestoreAssistantController: NSViewController, RestoreSessionDelegate
     private var demoMode = false
     private var demoIdentifier = "iPhone12,3"
     private var demoTimer: Timer?
+    private weak var cancelSheet: NSWindow?
 
     private var developerDemoEnabled: Bool {
         UserDefaults.standard.bool(forKey: "EnableDemoMode")
@@ -66,12 +67,14 @@ final class RestoreAssistantController: NSViewController, RestoreSessionDelegate
     private let auxiliaryButton = NSButton(title: "Options", target: nil, action: nil)
     private let nextButton = NSButton(title: "Start", target: nil, action: nil)
     private let logWindow = RestoreLogWindow()
-    private weak var liveOutputLabel: NSTextField?
-    private weak var liveConsoleView: NSTextView?
+    private weak var liveStageLabel: NSTextField?
+    private weak var livePercentLabel: NSTextField?
+    private weak var liveProgressBar: NSProgressIndicator?
+    private weak var liveConsoleView: LogTranscriptView?
     private weak var promptTextField: NSTextField?
 
     override func loadView() {
-        view = NSView(frame: NSRect(x: 0, y: 0, width: 480, height: 326))
+        view = NSView(frame: NSRect(origin: .zero, size: Self.initialContentSize))
         view.wantsLayer = true
         view.layer?.backgroundColor = NSColor(srgbRed: 48.0 / 255.0, green: 47.0 / 255.0, blue: 45.0 / 255.0, alpha: 1).cgColor
         buildFrame()
@@ -82,12 +85,16 @@ final class RestoreAssistantController: NSViewController, RestoreSessionDelegate
         restoreSession.delegate = self
         deviceObserver.onUpdate = { [weak self] device in
             guard let self = self else { return }
-            guard !self.demoMode else { return }
+            guard !self.demoMode, self.device != device else { return }
             self.device = device
             if self.step == .welcome { self.render() }
         }
-        deviceObserver.start()
+        logWindow.onDisplayUpdate = { [weak self] text in self?.liveConsoleView?.showText(text) }
         render()
+    }
+
+    func startMonitoring() {
+        deviceObserver.start()
         prepareEngine()
     }
 
@@ -103,17 +110,17 @@ final class RestoreAssistantController: NSViewController, RestoreSessionDelegate
         view.addSubview(nextButton)
 
         NSLayoutConstraint.activate([
-            page.topAnchor.constraint(equalTo: view.topAnchor, constant: 9),
-            page.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
-            page.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
-            page.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -49),
+            page.topAnchor.constraint(equalTo: view.topAnchor, constant: 14),
+            page.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
+            page.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
+            page.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -58),
 
-            backButton.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 12),
-            backButton.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -9),
-            auxiliaryButton.trailingAnchor.constraint(equalTo: nextButton.leadingAnchor, constant: -20),
+            backButton.leadingAnchor.constraint(equalTo: view.leadingAnchor, constant: 16),
+            backButton.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -14),
+            auxiliaryButton.trailingAnchor.constraint(equalTo: nextButton.leadingAnchor, constant: -12),
             auxiliaryButton.bottomAnchor.constraint(equalTo: nextButton.bottomAnchor),
-            nextButton.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -12),
-            nextButton.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -9)
+            nextButton.trailingAnchor.constraint(equalTo: view.trailingAnchor, constant: -16),
+            nextButton.bottomAnchor.constraint(equalTo: view.bottomAnchor, constant: -14)
         ])
     }
 
@@ -122,16 +129,21 @@ final class RestoreAssistantController: NSViewController, RestoreSessionDelegate
         button.action = action
         button.bezelStyle = .rounded
         button.controlSize = .regular
-        button.font = InterfaceTheme.button
+        button.font = primary ? InterfaceTheme.primaryButton : InterfaceTheme.button
         button.translatesAutoresizingMaskIntoConstraints = false
         button.widthAnchor.constraint(greaterThanOrEqualToConstant: 86).isActive = true
-        button.heightAnchor.constraint(equalToConstant: 24).isActive = true
+        button.heightAnchor.constraint(equalToConstant: 28).isActive = true
     }
 
     private func render() {
-        liveOutputLabel = nil
+        liveStageLabel = nil
+        livePercentLabel = nil
+        liveProgressBar = nil
         liveConsoleView = nil
         promptTextField = nil
+        backButton.title = "Back"
+        backButton.keyEquivalent = ""
+        nextButton.keyEquivalent = ""
         page.subviews.forEach { $0.removeFromSuperview() }
         switch step {
         case .welcome: renderWelcome()
@@ -168,9 +180,12 @@ final class RestoreAssistantController: NSViewController, RestoreSessionDelegate
             statusTitle = "Connect an iPhone to begin."
             statusDetail = "Normal, Recovery, and DFU mode are detected automatically."
         }
-        let status = label(statusTitle, size: 14, weight: .semibold)
+        let status = fittingLabel(statusTitle, size: 14, weight: .semibold)
         let visibleDetail = demoMode ? "\(device?.identifier ?? demoIdentifier)  •  Demo mode  •  No device commands will run" : statusDetail
-        let detail = label(engineDownloadFailed && !demoMode ? "Could not download surrealra1n. Open Options to retry." : visibleDetail, size: 12, color: .secondaryLabelColor)
+        let detail = fittingLabel(visibleDetail, size: 12, color: .secondaryLabelColor)
+        let preparation = fittingLabel(engineDownloadFailed ? "Download failed. Open Options to retry." : engineStatus,
+                                       size: 12, color: engineDownloadFailed ? .systemOrange : .secondaryLabelColor)
+        let showPreparation = engineURL == nil && !demoMode
         let warning = label("NOTE: A tethered restore erases the device. Keep a backup and use this experimental software at your own risk.", size: 12.5, color: NSColor(srgbRed: 215.0 / 255.0, green: 213.0 / 255.0, blue: 214.0 / 255.0, alpha: 1), wrapping: true)
         warning.font = NSFontManager.shared.convert(warning.font!, toHaveTrait: .italicFontMask)
         let firstDivider = NSBox()
@@ -190,10 +205,10 @@ final class RestoreAssistantController: NSViewController, RestoreSessionDelegate
             logo.trailingAnchor.constraint(equalTo: page.trailingAnchor), logo.topAnchor.constraint(equalTo: page.topAnchor),
             logo.widthAnchor.constraint(equalToConstant: 64), logo.heightAnchor.constraint(equalToConstant: 64),
             status.leadingAnchor.constraint(equalTo: page.leadingAnchor), status.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 10),
-            status.trailingAnchor.constraint(equalTo: page.trailingAnchor, constant: -80),
+            status.trailingAnchor.constraint(equalTo: logo.leadingAnchor, constant: -16),
             detail.leadingAnchor.constraint(equalTo: status.leadingAnchor), detail.topAnchor.constraint(equalTo: status.bottomAnchor, constant: 8),
-            detail.trailingAnchor.constraint(equalTo: page.trailingAnchor),
-            firstDivider.leadingAnchor.constraint(equalTo: page.leadingAnchor), firstDivider.trailingAnchor.constraint(equalTo: page.trailingAnchor), firstDivider.topAnchor.constraint(equalTo: detail.bottomAnchor, constant: 24),
+            detail.trailingAnchor.constraint(equalTo: status.trailingAnchor),
+            firstDivider.leadingAnchor.constraint(equalTo: page.leadingAnchor), firstDivider.trailingAnchor.constraint(equalTo: page.trailingAnchor),
             madeBy.leadingAnchor.constraint(equalTo: page.leadingAnchor), madeBy.trailingAnchor.constraint(equalTo: page.trailingAnchor), madeBy.topAnchor.constraint(equalTo: firstDivider.bottomAnchor, constant: 10),
             engineCredit.leadingAnchor.constraint(equalTo: page.leadingAnchor), engineCredit.topAnchor.constraint(equalTo: madeBy.bottomAnchor, constant: 3),
             thanks.leadingAnchor.constraint(equalTo: page.leadingAnchor), thanks.trailingAnchor.constraint(equalTo: page.trailingAnchor), thanks.topAnchor.constraint(equalTo: engineCredit.bottomAnchor, constant: 12),
@@ -202,6 +217,16 @@ final class RestoreAssistantController: NSViewController, RestoreSessionDelegate
             warning.leadingAnchor.constraint(equalTo: page.leadingAnchor), warning.trailingAnchor.constraint(equalTo: page.trailingAnchor),
             warning.topAnchor.constraint(equalTo: secondDivider.bottomAnchor, constant: 10)
         ])
+        if showPreparation {
+            page.addSubview(preparation)
+            NSLayoutConstraint.activate([
+                preparation.leadingAnchor.constraint(equalTo: detail.leadingAnchor), preparation.trailingAnchor.constraint(equalTo: detail.trailingAnchor),
+                preparation.topAnchor.constraint(equalTo: detail.bottomAnchor, constant: 8),
+                firstDivider.topAnchor.constraint(equalTo: preparation.bottomAnchor, constant: 18)
+            ])
+        } else {
+            firstDivider.topAnchor.constraint(equalTo: detail.bottomAnchor, constant: 24).isActive = true
+        }
 
         backButton.isHidden = true
         auxiliaryButton.isHidden = false
@@ -214,7 +239,7 @@ final class RestoreAssistantController: NSViewController, RestoreSessionDelegate
     private func renderOptions() {
         let title = heading("Options")
         let intro = label("surrealra1n is prepared automatically. No local engine folder is used.", size: 13, wrapping: true)
-        let automatic = NSButton(checkboxWithTitle: "Open the complete log when an error occurs", target: self, action: #selector(toggleErrorLogs))
+        let automatic = NSButton(checkboxWithTitle: "Open the log window when an error occurs", target: self, action: #selector(toggleErrorLogs))
         automatic.state = showLogsOnError ? .on : .off
         automatic.controlSize = .regular
         automatic.font = InterfaceTheme.body
@@ -234,28 +259,37 @@ final class RestoreAssistantController: NSViewController, RestoreSessionDelegate
         demoDevice.isEnabled = demoMode
         demoDevice.translatesAutoresizingMaskIntoConstraints = false
         let bootchainsTitle = label("Bootchain library", size: 12, weight: .semibold)
-        let bootchainsPath = label(displayPath(engineWorkspace.bootchainsDirectory), size: 11, color: InterfaceTheme.muted)
-        bootchainsPath.lineBreakMode = .byTruncatingMiddle
+        let bootchainsPath = fittingLabel(displayPath(engineWorkspace.bootchainsDirectory), size: 11, color: InterfaceTheme.muted, lineBreak: .byTruncatingMiddle)
         let chooseBootchains = actionButton("Change…", action: #selector(chooseBootchainsDirectory))
         let resetBootchains = actionButton("Default", action: #selector(resetBootchainsDirectory))
         let repository = label("Source: github.com/pwnerblu/surrealra1n (development)", size: 12, color: .secondaryLabelColor, wrapping: true)
         let state = label(engineStatus, size: 12, color: engineDownloadFailed ? .systemRed : .secondaryLabelColor, wrapping: true)
+        state.maximumNumberOfLines = 3
+        state.cell?.truncatesLastVisibleLine = true
+        state.toolTip = engineStatus
         let retry = actionButton("Download Again", action: #selector(retryEngineDownload))
-        retry.isHidden = !engineDownloadFailed
-        [title, intro, automatic, bootchainsTitle, bootchainsPath, chooseBootchains, resetBootchains, repository, state, retry].forEach(page.addSubview)
+        [title, intro, automatic, bootchainsTitle, bootchainsPath, chooseBootchains, resetBootchains, repository, state].forEach(page.addSubview)
         if developerDemoEnabled { [demo, demoDeviceTitle, demoDevice].forEach(page.addSubview) }
         var constraints = [
             title.leadingAnchor.constraint(equalTo: page.leadingAnchor), title.topAnchor.constraint(equalTo: page.topAnchor, constant: 8),
-            intro.leadingAnchor.constraint(equalTo: page.leadingAnchor), intro.trailingAnchor.constraint(equalTo: page.trailingAnchor), intro.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 22),
-            automatic.leadingAnchor.constraint(equalTo: page.leadingAnchor), automatic.topAnchor.constraint(equalTo: intro.bottomAnchor, constant: 22),
+            intro.leadingAnchor.constraint(equalTo: page.leadingAnchor), intro.trailingAnchor.constraint(equalTo: page.trailingAnchor), intro.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 16),
+            state.leadingAnchor.constraint(equalTo: page.leadingAnchor), state.topAnchor.constraint(equalTo: intro.bottomAnchor, constant: 12),
+            automatic.leadingAnchor.constraint(equalTo: page.leadingAnchor), automatic.topAnchor.constraint(equalTo: state.bottomAnchor, constant: 20),
             bootchainsTitle.leadingAnchor.constraint(equalTo: page.leadingAnchor),
             bootchainsPath.leadingAnchor.constraint(equalTo: page.leadingAnchor), bootchainsPath.centerYAnchor.constraint(equalTo: chooseBootchains.centerYAnchor),
             chooseBootchains.leadingAnchor.constraint(equalTo: bootchainsPath.trailingAnchor, constant: 8), chooseBootchains.widthAnchor.constraint(equalToConstant: 72),
             resetBootchains.leadingAnchor.constraint(equalTo: chooseBootchains.trailingAnchor, constant: 6), resetBootchains.trailingAnchor.constraint(equalTo: page.trailingAnchor), resetBootchains.centerYAnchor.constraint(equalTo: chooseBootchains.centerYAnchor), resetBootchains.widthAnchor.constraint(equalToConstant: 64),
-            repository.leadingAnchor.constraint(equalTo: page.leadingAnchor), repository.trailingAnchor.constraint(equalTo: page.trailingAnchor), repository.topAnchor.constraint(equalTo: chooseBootchains.bottomAnchor, constant: 8),
-            state.leadingAnchor.constraint(equalTo: page.leadingAnchor), state.trailingAnchor.constraint(equalTo: page.trailingAnchor), state.topAnchor.constraint(equalTo: repository.bottomAnchor, constant: 10),
-            retry.leadingAnchor.constraint(equalTo: page.leadingAnchor), retry.topAnchor.constraint(equalTo: state.bottomAnchor, constant: 12)
+            repository.leadingAnchor.constraint(equalTo: page.leadingAnchor), repository.trailingAnchor.constraint(equalTo: page.trailingAnchor), repository.topAnchor.constraint(equalTo: chooseBootchains.bottomAnchor, constant: 8)
         ]
+        if engineDownloadFailed {
+            page.addSubview(retry)
+            constraints += [
+                retry.trailingAnchor.constraint(equalTo: page.trailingAnchor), retry.topAnchor.constraint(equalTo: state.topAnchor),
+                state.trailingAnchor.constraint(equalTo: retry.leadingAnchor, constant: -12)
+            ]
+        } else {
+            constraints.append(state.trailingAnchor.constraint(equalTo: page.trailingAnchor))
+        }
         if developerDemoEnabled {
             constraints += [
                 demo.leadingAnchor.constraint(equalTo: page.leadingAnchor), demo.topAnchor.constraint(equalTo: automatic.bottomAnchor, constant: 8),
@@ -327,7 +361,7 @@ final class RestoreAssistantController: NSViewController, RestoreSessionDelegate
         }
         let intro = label(introText, size: 13, wrapping: true)
         let targetTitle = label("Target IPSW", size: 13, weight: .semibold)
-        let targetName = label(targetURL?.lastPathComponent ?? "No target selected", size: 12, color: .secondaryLabelColor)
+        let targetName = fittingLabel(targetURL?.lastPathComponent ?? "No target selected", size: 12, color: .secondaryLabelColor, lineBreak: .byTruncatingMiddle)
         let targetChoose = actionButton("Choose…", action: #selector(selectTarget))
         [title, intro, targetTitle, targetName, targetChoose].forEach(page.addSubview)
         var constraints = [
@@ -343,7 +377,7 @@ final class RestoreAssistantController: NSViewController, RestoreSessionDelegate
             let secondTitleText = operation == .restoreWithBlobs ? "SHSH2 ticket" : "Signed base IPSW"
             let secondNameText = operation == .restoreWithBlobs ? (shshURL?.lastPathComponent ?? "No SHSH2 selected") : (baseURL?.lastPathComponent ?? "No base selected")
             let secondTitle = label(secondTitleText, size: 13, weight: .semibold)
-            let secondName = label(secondNameText, size: 12, color: .secondaryLabelColor)
+            let secondName = fittingLabel(secondNameText, size: 12, color: .secondaryLabelColor, lineBreak: .byTruncatingMiddle)
             let secondChoose = actionButton("Choose…", action: operation == .restoreWithBlobs ? #selector(selectSHSH) : #selector(selectBase))
             [secondTitle, secondName, secondChoose].forEach(page.addSubview)
             constraints += [
@@ -395,33 +429,52 @@ final class RestoreAssistantController: NSViewController, RestoreSessionDelegate
     private func renderReady() {
         let destructive = operation != .justBoot
         let title = heading(destructive ? "Ready to restore" : "Ready to boot")
-        let deviceText = device.map { "\($0.name) (\($0.identifier))\n\($0.mode) mode • ECID \($0.ecid)" } ?? "No device detected"
-        let summary = label(deviceText, size: 15, weight: .semibold, wrapping: true)
-        let details: String
-        if operation == .restoreWithBlobs {
-            details = "Target: \(targetURL?.lastPathComponent ?? "Not selected")\nSHSH2: \(shshURL?.lastPathComponent ?? "Not selected")"
-        } else if operation == .tetheredRestore {
-            details = "Target: \(targetURL?.lastPathComponent ?? "Not selected")\nBase: \(baseURL?.lastPathComponent ?? "Not selected")"
-        } else if operation == .untethered1033 {
-            details = "Target: \(targetURL?.lastPathComponent ?? "Not selected")\nA7 OTA restore path"
-        } else {
-            details = "Boot version: \(selectedBootVersion ?? "Not selected")\nsurrealra1n will use the generated boot files for this device."
+        let deviceText = device.map { "\($0.name) (\($0.identifier))" } ?? "No device detected"
+        var rows = [fittingLabel(deviceText, size: 15, weight: .semibold, lineBreak: .byTruncatingMiddle)]
+        if let device {
+            rows.append(fittingLabel("\(device.mode) mode • ECID \(device.ecid)", size: 12, color: .secondaryLabelColor))
         }
-        let files = label(details, size: 13, color: .secondaryLabelColor, wrapping: true)
+        let details: [String]
+        if operation == .restoreWithBlobs {
+            details = ["Target: \(targetURL?.lastPathComponent ?? "Not selected")", "SHSH2: \(shshURL?.lastPathComponent ?? "Not selected")"]
+        } else if operation == .tetheredRestore {
+            details = ["Target: \(targetURL?.lastPathComponent ?? "Not selected")", "Base: \(baseURL?.lastPathComponent ?? "Not selected")"]
+        } else if operation == .untethered1033 {
+            details = ["Target: \(targetURL?.lastPathComponent ?? "Not selected")", "A7 OTA restore path"]
+        } else {
+            details = ["Boot version: \(selectedBootVersion ?? "Not selected")", "surrealra1n will use the generated boot files for this device."]
+        }
+        rows += details.map { fittingLabel($0, size: 13, color: .secondaryLabelColor, lineBreak: .byTruncatingMiddle) }
         let warning = label(destructive ? "This operation erases the device. Do not unplug it after the restore begins." : "Keep the device connected until the boot finishes.", size: 13, color: NSColor.systemOrange, wrapping: true)
-        [title, summary, files, warning].forEach(page.addSubview)
-        NSLayoutConstraint.activate([
-            title.leadingAnchor.constraint(equalTo: page.leadingAnchor), title.topAnchor.constraint(equalTo: page.topAnchor, constant: 8),
-            summary.leadingAnchor.constraint(equalTo: page.leadingAnchor), summary.trailingAnchor.constraint(equalTo: page.trailingAnchor), summary.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 30),
-            files.leadingAnchor.constraint(equalTo: page.leadingAnchor), files.trailingAnchor.constraint(equalTo: page.trailingAnchor), files.topAnchor.constraint(equalTo: summary.bottomAnchor, constant: 26),
-            warning.leadingAnchor.constraint(equalTo: page.leadingAnchor), warning.trailingAnchor.constraint(equalTo: page.trailingAnchor), warning.bottomAnchor.constraint(equalTo: page.bottomAnchor, constant: -12)
-        ])
+        ([title] + rows + [warning]).forEach(page.addSubview)
+        var constraints = [title.leadingAnchor.constraint(equalTo: page.leadingAnchor), title.topAnchor.constraint(equalTo: page.topAnchor, constant: 8)]
+        var previous = title
+        for (index, row) in rows.enumerated() {
+            constraints += [
+                row.leadingAnchor.constraint(equalTo: page.leadingAnchor), row.trailingAnchor.constraint(equalTo: page.trailingAnchor),
+                row.topAnchor.constraint(equalTo: previous.bottomAnchor, constant: index == 0 ? 24 : 8)
+            ]
+            previous = row
+        }
+        constraints += [
+            warning.leadingAnchor.constraint(equalTo: page.leadingAnchor), warning.trailingAnchor.constraint(equalTo: page.trailingAnchor),
+            warning.topAnchor.constraint(equalTo: previous.bottomAnchor, constant: 24)
+        ]
+        NSLayoutConstraint.activate(constraints)
         standardNavigation(next: destructive ? "Start Restore" : "Start Boot")
     }
 
     private func renderHandoff() {
         if isChoosingPackageManager {
             renderRunning()
+            return
+        }
+        if case .yesNo = currentPrompt {
+            renderTextHandoff()
+            return
+        }
+        if case .continueOnly = currentPrompt {
+            renderTextHandoff()
             return
         }
         let phone = phoneArtwork(named: dfuProfile.assetName)
@@ -453,9 +506,42 @@ final class RestoreAssistantController: NSViewController, RestoreSessionDelegate
             title.trailingAnchor.constraint(equalTo: page.trailingAnchor),
             instructions.leadingAnchor.constraint(equalTo: title.leadingAnchor), instructions.trailingAnchor.constraint(equalTo: page.trailingAnchor), instructions.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 24)
         ] + fieldConstraints)
-        backButton.isHidden = true
+        configureHandoffNavigation()
+    }
+
+    private func renderTextHandoff() {
+        let title = heading(handoffTitle)
+        let scroll = NSTextView.scrollableTextView()
+        scroll.borderType = .bezelBorder
+        scroll.autohidesScrollers = true
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        if let text = scroll.documentView as? NSTextView {
+            text.isEditable = false
+            text.isSelectable = true
+            text.font = InterfaceTheme.body
+            text.textContainerInset = NSSize(width: 10, height: 10)
+            text.textContainer?.lineBreakMode = .byCharWrapping
+            text.string = handoffInstructions
+        }
+        [title, scroll].forEach(page.addSubview)
+        NSLayoutConstraint.activate([
+            title.leadingAnchor.constraint(equalTo: page.leadingAnchor), title.topAnchor.constraint(equalTo: page.topAnchor, constant: 8),
+            scroll.leadingAnchor.constraint(equalTo: page.leadingAnchor), scroll.trailingAnchor.constraint(equalTo: page.trailingAnchor),
+            scroll.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 12), scroll.bottomAnchor.constraint(equalTo: page.bottomAnchor)
+        ])
+        configureHandoffNavigation()
+    }
+
+    private func configureHandoffNavigation() {
+        backButton.isHidden = false
+        backButton.title = "Cancel"
+        backButton.keyEquivalent = "\u{1b}"
         auxiliaryButton.isHidden = false
-        auxiliaryButton.title = promptHasNegativeChoice ? "No / Reuse" : "Show Logs"
+        switch currentPrompt {
+        case .yesNo: auxiliaryButton.title = "No"
+        case .rebuildFiles: auxiliaryButton.title = "Reuse"
+        default: auxiliaryButton.title = "Show Logs"
+        }
         nextButton.isHidden = false
         nextButton.title = handoffButtonTitle
         nextButton.isEnabled = true
@@ -463,40 +549,23 @@ final class RestoreAssistantController: NSViewController, RestoreSessionDelegate
 
     private func renderRunning() {
         let title = heading(operation == .justBoot ? "Booting device…" : "Restoring device…")
-        let stage = label(isChoosingPackageManager ? handoffTitle : currentStage, size: 13, weight: .semibold, wrapping: true)
-        let percent = label("\(Int((currentProgress * 100).rounded()))%", size: 12, weight: .semibold)
+        let stage = fittingLabel("", size: 13, weight: .semibold)
+        let percent = label("", size: 12, weight: .semibold)
         percent.font = InterfaceTheme.percentage
         percent.alignment = .right
         let progress = NSProgressIndicator()
         progress.isIndeterminate = false
         progress.minValue = 0
         progress.maxValue = 1
-        progress.doubleValue = currentProgress
         progress.translatesAutoresizingMaskIntoConstraints = false
         progress.controlSize = .small
-        let scroll = NSScrollView()
+        let scroll = LogTranscriptView(background: NSColor(calibratedWhite: 0.105, alpha: 1))
         scroll.borderType = .bezelBorder
-        scroll.hasVerticalScroller = true
-        scroll.autohidesScrollers = true
-        scroll.drawsBackground = true
-        scroll.backgroundColor = NSColor(calibratedWhite: 0.105, alpha: 1)
         scroll.translatesAutoresizingMaskIntoConstraints = false
-        let console = NSTextView(frame: NSRect(x: 0, y: 0, width: 420, height: 132))
-        console.isEditable = false
-        console.isSelectable = true
-        console.isRichText = false
-        console.isVerticallyResizable = true
-        console.isHorizontallyResizable = false
-        console.autoresizingMask = [.width]
-        console.minSize = NSSize(width: 0, height: 132)
-        console.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
-        console.font = NSFont.monospacedSystemFont(ofSize: 9.5, weight: .regular)
-        console.textColor = NSColor(calibratedWhite: 0.88, alpha: 1)
-        console.backgroundColor = scroll.backgroundColor
-        console.textContainerInset = NSSize(width: 7, height: 6)
-        console.string = liveTranscript
-        scroll.documentView = console
-        liveConsoleView = console
+        liveStageLabel = stage
+        livePercentLabel = percent
+        liveProgressBar = progress
+        liveConsoleView = scroll
         [title, stage, percent, progress, scroll].forEach(page.addSubview)
         var consoleTop = progress.bottomAnchor
         if isChoosingPackageManager {
@@ -515,20 +584,33 @@ final class RestoreAssistantController: NSViewController, RestoreSessionDelegate
             consoleTop = choices.bottomAnchor
         }
         NSLayoutConstraint.activate([
-            title.leadingAnchor.constraint(equalTo: page.leadingAnchor, constant: 12), title.topAnchor.constraint(equalTo: page.topAnchor, constant: 5),
+            title.leadingAnchor.constraint(equalTo: page.leadingAnchor), title.topAnchor.constraint(equalTo: page.topAnchor, constant: 5),
             stage.leadingAnchor.constraint(equalTo: title.leadingAnchor), stage.trailingAnchor.constraint(equalTo: percent.leadingAnchor, constant: -12), stage.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 10),
-            percent.trailingAnchor.constraint(equalTo: page.trailingAnchor, constant: -24), percent.firstBaselineAnchor.constraint(equalTo: stage.firstBaselineAnchor), percent.widthAnchor.constraint(equalToConstant: 42),
+            percent.trailingAnchor.constraint(equalTo: page.trailingAnchor), percent.firstBaselineAnchor.constraint(equalTo: stage.firstBaselineAnchor), percent.widthAnchor.constraint(equalToConstant: 42),
             progress.leadingAnchor.constraint(equalTo: title.leadingAnchor), progress.trailingAnchor.constraint(equalTo: percent.trailingAnchor), progress.topAnchor.constraint(equalTo: stage.bottomAnchor, constant: 12),
             scroll.leadingAnchor.constraint(equalTo: title.leadingAnchor), scroll.trailingAnchor.constraint(equalTo: percent.trailingAnchor),
             scroll.topAnchor.constraint(equalTo: consoleTop, constant: 9), scroll.bottomAnchor.constraint(equalTo: page.bottomAnchor, constant: -2)
         ])
-        console.scrollToEndOfDocument(nil)
+        updateRunningProgress()
+        view.layoutSubtreeIfNeeded()
+        scroll.showText(logWindow.displayText, reset: true)
         backButton.isHidden = true
         auxiliaryButton.isHidden = false
         auxiliaryButton.title = "Show Logs"
         nextButton.isHidden = false
         nextButton.title = "Cancel"
+        nextButton.keyEquivalent = "\u{1b}"
         nextButton.isEnabled = true
+    }
+
+    private func updateRunningProgress() {
+        let stage = isChoosingPackageManager ? handoffTitle : currentStage
+        if liveStageLabel?.stringValue != stage {
+            liveStageLabel?.stringValue = stage
+            liveStageLabel?.toolTip = stage
+        }
+        livePercentLabel?.stringValue = "\(Int((currentProgress * 100).rounded()))%"
+        liveProgressBar?.doubleValue = currentProgress
     }
 
     private func renderDFUSequence() {
@@ -580,6 +662,7 @@ final class RestoreAssistantController: NSViewController, RestoreSessionDelegate
         auxiliaryButton.title = "Show Logs"
         nextButton.isHidden = false
         nextButton.title = "Cancel"
+        nextButton.keyEquivalent = "\u{1b}"
         nextButton.isEnabled = true
     }
 
@@ -631,6 +714,9 @@ final class RestoreAssistantController: NSViewController, RestoreSessionDelegate
         case .firmware: step = .operation
         case .bootVersion: step = .operation
         case .ready: step = operation == .justBoot ? .bootVersion : .firmware
+        case .handoff:
+            requestCancel()
+            return
         default: return
         }
         render()
@@ -657,10 +743,10 @@ final class RestoreAssistantController: NSViewController, RestoreSessionDelegate
             beginOperation()
             return
         case .handoff:
-            if isChoosingPackageManager { confirmCancel() } else { answerPrompt(positive: true) }
+            if isChoosingPackageManager { requestCancel() } else { answerPrompt(positive: true) }
             return
         case .running, .dfuSequence:
-            confirmCancel()
+            requestCancel()
             return
         case .finished:
             currentProgress = 0
@@ -841,11 +927,8 @@ final class RestoreAssistantController: NSViewController, RestoreSessionDelegate
             guard alert.runModal() == .alertFirstButtonReturn else { return }
         }
         logWindow.clear()
-        inlineLogRenderer.clear()
-        liveTranscript = ""
         currentProgress = 0
         currentStage = "Starting surrealra1n"
-        currentOutputLine = "Launching surrealra1n…"
         step = .running
         render()
         do {
@@ -866,23 +949,32 @@ final class RestoreAssistantController: NSViewController, RestoreSessionDelegate
         }
     }
 
-    private func confirmCancel() {
+    func requestCancel() {
+        guard step == .running || step == .dfuSequence || step == .handoff else { return }
         let alert = NSAlert()
         alert.messageText = "Stop the current operation?"
         alert.informativeText = demoMode ? "This stops only the fake UI demonstration." : "Stopping during a restore can leave the device in Recovery or DFU mode."
         alert.alertStyle = .warning
         alert.addButton(withTitle: "Keep Running")
         alert.addButton(withTitle: "Stop")
-        if alert.runModal() == .alertSecondButtonReturn {
-            if demoMode {
-                demoTimer?.invalidate()
-                demoTimer = nil
-                finishedCode = 130
-                step = .finished
-                render()
+        let handleResponse: (NSApplication.ModalResponse) -> Void = { [weak self] response in
+            guard let self else { return }
+            self.cancelSheet = nil
+            guard response == .alertSecondButtonReturn, self.step != .finished else { return }
+            if self.demoMode {
+                self.demoTimer?.invalidate()
+                self.demoTimer = nil
+                self.restoreSession(self.restoreSession, didFinishWith: 130)
             } else {
-                restoreSession.cancel()
+                self.restoreSession.cancel()
             }
+        }
+        if let window = view.window {
+            guard window.attachedSheet == nil else { return }
+            cancelSheet = alert.window
+            alert.beginSheetModal(for: window, completionHandler: handleResponse)
+        } else {
+            handleResponse(alert.runModal())
         }
     }
 
@@ -938,12 +1030,9 @@ final class RestoreAssistantController: NSViewController, RestoreSessionDelegate
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
         logWindow.clear()
-        inlineLogRenderer.clear()
-        liveTranscript = ""
         appendLog("[demo] UI Demo Mode started\n[demo] No device commands will run\n")
         currentProgress = 0.02
         currentStage = operation == .justBoot ? "Checking saved boot files" : "Preparing restore"
-        currentOutputLine = currentStage
         step = .running
         render()
         showDemoPrompt(.recoveryReady, after: 0.8)
@@ -1044,7 +1133,7 @@ final class RestoreAssistantController: NSViewController, RestoreSessionDelegate
         currentStage = stages[index].1
         appendLog(stages[index].1 + "\n")
         step = .running
-        render()
+        refreshProgressScreen()
         scheduleDemo(after: 1.0) { [weak self] in self?.runDemoProgressStage(stages, index: index + 1) }
     }
 
@@ -1215,8 +1304,9 @@ final class RestoreAssistantController: NSViewController, RestoreSessionDelegate
         engineURL = nil
         engineDownloadFailed = false
         engineWorkspace.prepare(status: { [weak self] status in
-            self?.engineStatus = status
-            if self?.step == .options { self?.render() }
+            guard let self else { return }
+            self.engineStatus = status
+            if self.step == .welcome || self.step == .options { self.render() }
         }, completion: { [weak self] result in
             guard let self = self else { return }
             switch result {
@@ -1248,6 +1338,17 @@ final class RestoreAssistantController: NSViewController, RestoreSessionDelegate
         else { field.font = InterfaceTheme.bodyStrong }
         field.textColor = color ?? InterfaceTheme.foreground
         field.translatesAutoresizingMaskIntoConstraints = false
+        if wrapping { field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal) }
+        return field
+    }
+
+    private func fittingLabel(_ text: String, size: CGFloat, weight: NSFont.Weight = .regular, color: NSColor? = nil,
+                              lineBreak: NSLineBreakMode = .byTruncatingTail) -> NSTextField {
+        let field = label(text, size: size, weight: weight, color: color)
+        // Let text fit the window instead of letting AppKit widen the window for its intrinsic size.
+        field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        field.lineBreakMode = lineBreak
+        field.toolTip = text
         return field
     }
 
@@ -1272,11 +1373,6 @@ final class RestoreAssistantController: NSViewController, RestoreSessionDelegate
 
     private func appendLog(_ text: String) {
         logWindow.append(text)
-        liveTranscript = inlineLogRenderer.feed(text)
-        if let console = liveConsoleView {
-            console.string = liveTranscript
-            console.scrollToEndOfDocument(nil)
-        }
     }
 
     private var dfuProfile: DFUInstructions {
@@ -1318,13 +1414,15 @@ final class RestoreAssistantController: NSViewController, RestoreSessionDelegate
 
     func restoreSession(_ session: RestoreSession, received text: String) {
         appendLog(text)
-        if let line = liveTranscript.components(separatedBy: .newlines).last(where: { !$0.trimmingCharacters(in: .whitespaces).isEmpty }) {
-            currentOutputLine = line.trimmingCharacters(in: .whitespaces)
-            liveOutputLabel?.stringValue = currentOutputLine
-        }
     }
 
     func restoreSession(_ session: RestoreSession, didAdvanceTo stage: String, progress: Double) {
+        if step == .handoff {
+            currentProgress = progress
+            if isChoosingPackageManager { updateRunningProgress() }
+            return
+        }
+        guard step == .running || step == .dfuSequence else { return }
         if stage.hasPrefix("DFU: ") {
             currentStage = String(stage.dropFirst(5))
             step = .dfuSequence
@@ -1333,7 +1431,15 @@ final class RestoreAssistantController: NSViewController, RestoreSessionDelegate
             if step == .dfuSequence { step = .running }
         }
         currentProgress = progress
-        if step == .running || step == .dfuSequence { render() }
+        refreshProgressScreen()
+    }
+
+    private func refreshProgressScreen() {
+        if step == .running && liveProgressBar != nil {
+            updateRunningProgress()
+        } else {
+            render()
+        }
     }
 
     func restoreSession(_ session: RestoreSession, requests prompt: RestorePrompt) {
@@ -1346,8 +1452,11 @@ final class RestoreAssistantController: NSViewController, RestoreSessionDelegate
         finishedCode = code
         currentPrompt = nil
         step = .finished
+        if let sheet = cancelSheet, let parent = sheet.sheetParent {
+            parent.endSheet(sheet, returnCode: .alertFirstButtonReturn)
+        }
         render()
-        if code != 0 && showLogsOnError { showLogs() }
+        if code != 0 && showLogsOnError && !demoMode { showLogs() }
     }
 
     var hasRunningOperation: Bool { restoreSession.isRunning || demoTimer != nil }

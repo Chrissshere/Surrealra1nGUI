@@ -1,6 +1,6 @@
 import Foundation
 
-struct ConnectedDevice {
+struct ConnectedDevice: Equatable {
     let name: String
     let identifier: String
     let ecid: String

@@ -41,10 +41,13 @@ final class SessionRecorder: RestoreSessionDelegate {
 
 @main
 enum RestoreSessionIntegration {
+    @MainActor
     static func main() throws {
         NSApplication.shared.setActivationPolicy(.prohibited)
         NSApplication.shared.finishLaunching()
         try testLogWindow()
+        try testTerminalOutput()
+        try RestoreAssistantLayout.run()
         if CommandLine.arguments.count > 1 {
             try testSourcePreparation(at: URL(fileURLWithPath: CommandLine.arguments[1]))
         }
@@ -61,6 +64,19 @@ enum RestoreSessionIntegration {
         try run(fixture: fixture, operation: .tetheredRestore, identifier: "iPhone12,3", expected: "A12/A13 device support is entirely experimental.", earlyExit: true)
         try run(fixture: fixture, operation: .tetheredRestore, identifier: "iPhone12,3", expected: "Restore has completed", earlyExit: false, heldPipe: true, successExit: true)
         print("RestoreSession integration tests passed")
+    }
+
+    private static func testTerminalOutput() throws {
+        let terminal = TerminalOutput()
+        terminal.append("One\r\nTwo\r")
+        terminal.append("\nThree")
+        guard terminal.text == "One\nTwo\nThree" else {
+            throw failure("Terminal output lost CRLF line breaks", output: terminal.text)
+        }
+        terminal.append("\n" + String(repeating: "x", count: 200_000) + "\nDone\n")
+        guard terminal.text.hasSuffix("\nDone\n"), terminal.text.count < 200_000 else {
+            throw failure("Terminal output did not keep a bounded recent transcript", output: "")
+        }
     }
 
     private static func testSourcePreparation(at url: URL) throws {
