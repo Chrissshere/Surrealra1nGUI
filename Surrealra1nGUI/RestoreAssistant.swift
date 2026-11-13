@@ -9,6 +9,14 @@ final class RestoreAssistantController: NSViewController, RestoreSessionDelegate
         case welcome, options, operation, firmware, bootVersion, ready, handoff, dfuSequence, running, finished
     }
 
+    private typealias FirmwarePicker = (String, String, @escaping (URL) -> Void) -> Void
+    private var firmwarePicker: FirmwarePicker?
+
+    convenience init(pickFirmware: @escaping (String, String, @escaping (URL) -> Void) -> Void) {
+        self.init(nibName: nil, bundle: nil)
+        firmwarePicker = pickFirmware
+    }
+
     private let restoreSession = RestoreSession()
     private let deviceObserver = DeviceObserver()
     private let engineWorkspace = EngineWorkspace()
@@ -21,6 +29,8 @@ final class RestoreAssistantController: NSViewController, RestoreSessionDelegate
     private var selectedBootVersion: String?
     private var bootVersions: [String] = []
     private var device: ConnectedDevice?
+    private var sessionDevice: ConnectedDevice?
+    private var restoredDevice: ConnectedDevice?
     private var currentPrompt: RestorePrompt?
     private var currentStage = "Preparing"
     private var currentProgress = 0.0
@@ -84,10 +94,7 @@ final class RestoreAssistantController: NSViewController, RestoreSessionDelegate
         super.viewDidLoad()
         restoreSession.delegate = self
         deviceObserver.onUpdate = { [weak self] device in
-            guard let self = self else { return }
-            guard !self.demoMode, self.device != device else { return }
-            self.device = device
-            if self.step == .welcome { self.render() }
+            self?.deviceDidChange(to: device)
         }
         logWindow.onDisplayUpdate = { [weak self] text in self?.liveConsoleView?.showText(text) }
         render()
@@ -96,6 +103,12 @@ final class RestoreAssistantController: NSViewController, RestoreSessionDelegate
     func startMonitoring() {
         deviceObserver.start()
         prepareEngine()
+    }
+
+    func deviceDidChange(to device: ConnectedDevice?) {
+        guard !demoMode, self.device != device else { return }
+        self.device = device
+        if step == .welcome || step == .bootVersion || step == .ready { render() }
     }
 
     private func buildFrame() {
@@ -398,7 +411,9 @@ final class RestoreAssistantController: NSViewController, RestoreSessionDelegate
     private func renderBootVersion() {
         refreshBootVersions()
         let title = heading("Choose a system to boot")
-        let intro = label("Just Boot uses files generated for this exact device. You can also import an existing bootchain folder.", size: 13, wrapping: true)
+        let introText = restoredDevice.map { "Choose the saved iOS version for \($0.name)." }
+            ?? "Just Boot uses files generated for this device. You can also import an existing bootchain folder."
+        let intro = label(introText, size: 13, wrapping: true)
         let versionTitle = label("Installed tethered iOS version", size: 13, weight: .semibold)
         let popup = NSPopUpButton()
         popup.addItems(withTitles: bootVersions)
@@ -409,10 +424,17 @@ final class RestoreAssistantController: NSViewController, RestoreSessionDelegate
         popup.isEnabled = !bootVersions.isEmpty
         popup.translatesAutoresizingMaskIntoConstraints = false
         let importButton = actionButton("Import Bootchain…", action: #selector(importBootchains))
-        let explanation = label(bootVersions.isEmpty
-            ? "No complete boot set was found. Import one, or complete a tethered restore with this GUI."
-            : "The newest generated version is selected automatically. Choose another version here if needed.",
-            size: 12, color: bootVersions.isEmpty ? .systemOrange : InterfaceTheme.muted, wrapping: true)
+        importButton.isEnabled = bootDevice != nil
+        let needsAttention = bootVersions.isEmpty || !deviceReadyForBoot
+        let explanationText: String
+        if !deviceReadyForBoot {
+            explanationText = "Reconnect the device you restored to continue."
+        } else if bootVersions.isEmpty {
+            explanationText = "No complete boot files were found. You can import a bootchain folder for this device."
+        } else {
+            explanationText = "The newest saved version is selected automatically. Choose the version installed on the device."
+        }
+        let explanation = label(explanationText, size: 12, color: needsAttention ? .systemOrange : InterfaceTheme.muted, wrapping: true)
         [title, intro, versionTitle, popup, importButton, explanation].forEach(page.addSubview)
         NSLayoutConstraint.activate([
             title.leadingAnchor.constraint(equalTo: page.leadingAnchor), title.topAnchor.constraint(equalTo: page.topAnchor, constant: 8),
@@ -423,15 +445,16 @@ final class RestoreAssistantController: NSViewController, RestoreSessionDelegate
             explanation.leadingAnchor.constraint(equalTo: page.leadingAnchor), explanation.trailingAnchor.constraint(equalTo: page.trailingAnchor), explanation.topAnchor.constraint(equalTo: popup.bottomAnchor, constant: 22)
         ])
         standardNavigation(next: "Continue")
-        nextButton.isEnabled = selectedBootVersion != nil
+        nextButton.isEnabled = selectedBootVersion != nil && deviceReadyForBoot
     }
 
     private func renderReady() {
         let destructive = operation != .justBoot
         let title = heading(destructive ? "Ready to restore" : "Ready to boot")
-        let deviceText = device.map { "\($0.name) (\($0.identifier))" } ?? "No device detected"
+        let displayedDevice = destructive ? device : bootDevice
+        let deviceText = displayedDevice.map { "\($0.name) (\($0.identifier))" } ?? "No device detected"
         var rows = [fittingLabel(deviceText, size: 15, weight: .semibold, lineBreak: .byTruncatingMiddle)]
-        if let device {
+        if let device = displayedDevice {
             rows.append(fittingLabel("\(device.mode) mode • ECID \(device.ecid)", size: 12, color: .secondaryLabelColor))
         }
         let details: [String]
@@ -445,7 +468,9 @@ final class RestoreAssistantController: NSViewController, RestoreSessionDelegate
             details = ["Boot version: \(selectedBootVersion ?? "Not selected")", "surrealra1n will use the generated boot files for this device."]
         }
         rows += details.map { fittingLabel($0, size: 13, color: .secondaryLabelColor, lineBreak: .byTruncatingMiddle) }
-        let warning = label(destructive ? "This operation erases the device. Do not unplug it after the restore begins." : "Keep the device connected until the boot finishes.", size: 13, color: NSColor.systemOrange, wrapping: true)
+        let warningText = destructive ? "This operation erases the device. Do not unplug it after the restore begins."
+            : (deviceReadyForBoot ? "Keep the device connected until the boot finishes." : "Reconnect the device you restored to continue.")
+        let warning = label(warningText, size: 13, color: NSColor.systemOrange, wrapping: true)
         ([title] + rows + [warning]).forEach(page.addSubview)
         var constraints = [title.leadingAnchor.constraint(equalTo: page.leadingAnchor), title.topAnchor.constraint(equalTo: page.topAnchor, constant: 8)]
         var previous = title
@@ -462,6 +487,7 @@ final class RestoreAssistantController: NSViewController, RestoreSessionDelegate
         ]
         NSLayoutConstraint.activate(constraints)
         standardNavigation(next: destructive ? "Start Restore" : "Start Boot")
+        nextButton.isEnabled = destructive ? (backendSupportsDevice || demoMode) : deviceReadyForBoot
     }
 
     private func renderHandoff() {
@@ -677,11 +703,12 @@ final class RestoreAssistantController: NSViewController, RestoreSessionDelegate
 
     private func renderFinished() {
         let success = finishedCode == 0
-        let title = heading(success ? "All done" : "The operation stopped")
+        let offerJustBoot = success && operation == .tetheredRestore
+        let title = heading(success ? (offerJustBoot ? "Restore complete" : "All done") : "The operation stopped")
         let symbol = label(success ? "✓" : "!", size: 62, weight: .bold, color: success ? .systemGreen : .systemRed)
         symbol.alignment = .center
-        let successMessage = operation == .tetheredRestore
-            ? "The tethered restore completed successfully. Recovery mode is expected. Choose Just Boot to start the restored system."
+        let successMessage = offerJustBoot
+            ? "Recovery mode is expected after a tethered restore. Choose Just Boot to select the installed iOS version and start it."
             : "surrealra1n finished successfully."
         let message = label(success ? successMessage : "surrealra1n exited with code \(finishedCode). Open the log for the exact failure.", size: 15, wrapping: true)
         message.alignment = .center
@@ -691,11 +718,12 @@ final class RestoreAssistantController: NSViewController, RestoreSessionDelegate
             symbol.centerXAnchor.constraint(equalTo: page.centerXAnchor), symbol.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 28),
             message.leadingAnchor.constraint(equalTo: page.leadingAnchor, constant: 60), message.trailingAnchor.constraint(equalTo: page.trailingAnchor, constant: -60), message.topAnchor.constraint(equalTo: symbol.bottomAnchor, constant: 20)
         ])
-        backButton.isHidden = true
+        backButton.isHidden = !offerJustBoot
+        backButton.title = "Done"
         auxiliaryButton.isHidden = false
         auxiliaryButton.title = "Show Logs"
         nextButton.isHidden = false
-        nextButton.title = success && operation == .tetheredRestore ? "Just Boot" : "Done"
+        nextButton.title = offerJustBoot ? "Just Boot" : "Done"
         nextButton.isEnabled = true
     }
 
@@ -712,11 +740,19 @@ final class RestoreAssistantController: NSViewController, RestoreSessionDelegate
         case .options: step = .welcome
         case .operation: step = .welcome
         case .firmware: step = .operation
-        case .bootVersion: step = .operation
+        case .bootVersion:
+            if restoredDevice != nil {
+                operation = .tetheredRestore
+                step = .finished
+            } else {
+                step = .operation
+            }
         case .ready: step = operation == .justBoot ? .bootVersion : .firmware
         case .handoff:
             requestCancel()
             return
+        case .finished:
+            returnToWelcome()
         default: return
         }
         render()
@@ -737,7 +773,7 @@ final class RestoreAssistantController: NSViewController, RestoreSessionDelegate
         case .firmware:
             step = .ready
         case .bootVersion:
-            guard selectedBootVersion != nil else { return }
+            guard selectedBootVersion != nil, deviceReadyForBoot else { return }
             step = .ready
         case .ready:
             beginOperation()
@@ -757,12 +793,19 @@ final class RestoreAssistantController: NSViewController, RestoreSessionDelegate
                 bootVersions = []
                 step = .bootVersion
             } else {
-                step = .welcome
+                returnToWelcome()
             }
         case .options:
             return
         }
         render()
+    }
+
+    private func returnToWelcome() {
+        restoredDevice = nil
+        selectedBootVersion = nil
+        bootVersions = []
+        step = .welcome
     }
 
     @objc private func auxiliaryAction() {
@@ -795,7 +838,7 @@ final class RestoreAssistantController: NSViewController, RestoreSessionDelegate
     }
 
     @objc private func importBootchains() {
-        guard let identifier = device?.identifier else { return }
+        guard let identifier = bootDevice?.identifier else { return }
         let panel = NSOpenPanel()
         panel.title = "Import Bootchains for \(identifier)"
         panel.prompt = "Import"
@@ -879,12 +922,25 @@ final class RestoreAssistantController: NSViewController, RestoreSessionDelegate
         return exact.contains(identifier)
     }
 
+    private var bootDevice: ConnectedDevice? { restoredDevice ?? device }
+
+    private var deviceReadyForBoot: Bool {
+        guard let device, let bootDevice, device.identifier == bootDevice.identifier else { return false }
+        // Device tools may report the same chip ID in decimal (Normal) or hex (Recovery).
+        guard let expected = normalizedECID(bootDevice.ecid), let connected = normalizedECID(device.ecid) else { return true }
+        return expected == connected
+    }
+
+    private func normalizedECID(_ value: String) -> UInt64? {
+        let id = value.lowercased()
+        return id.hasPrefix("0x") ? UInt64(id.dropFirst(2), radix: 16) : UInt64(id)
+    }
+
     private func refreshBootVersions() {
-        let identifier = device?.identifier ?? demoIdentifier
         let versions: [String]
         if demoMode {
             versions = ["16.4", "15.6.1", "14.8"]
-        } else if let engine = engineURL {
+        } else if let engine = engineURL, let identifier = bootDevice?.identifier {
             let root = engine.appendingPathComponent("boot", isDirectory: true).appendingPathComponent(identifier, isDirectory: true)
             let urls = (try? FileManager.default.contentsOfDirectory(at: root, includingPropertiesForKeys: [.isDirectoryKey], options: [.skipsHiddenFiles])) ?? []
             versions = urls.filter { url in
@@ -912,20 +968,38 @@ final class RestoreAssistantController: NSViewController, RestoreSessionDelegate
     }
 
     private func beginOperation() {
+        guard let device, backendSupportsDevice || demoMode,
+              operation != .justBoot || (selectedBootVersion != nil && deviceReadyForBoot) else { return }
         if demoMode {
             beginDemoRestore()
             return
         }
         guard let engine = engineURL else { return }
-        if operation != .justBoot {
-            let alert = NSAlert()
-            alert.messageText = "Erase and restore this device?"
-            alert.informativeText = "This cannot be undone. Keep the phone connected until surrealra1n finishes."
-            alert.alertStyle = .critical
-            alert.addButton(withTitle: "Start Restore")
-            alert.addButton(withTitle: "Cancel")
-            guard alert.runModal() == .alertFirstButtonReturn else { return }
+        if operation == .justBoot {
+            startOperation(using: engine, on: device)
+            return
         }
+        let alert = NSAlert()
+        alert.messageText = "Erase and restore this device?"
+        alert.informativeText = "This cannot be undone. Keep the phone connected until surrealra1n finishes."
+        alert.alertStyle = .critical
+        alert.addButton(withTitle: "Start Restore")
+        alert.addButton(withTitle: "Cancel")
+        let confirmed: (NSApplication.ModalResponse) -> Void = { [weak self] response in
+            guard let self, response == .alertFirstButtonReturn, self.step == .ready, self.device == device else { return }
+            self.startOperation(using: engine, on: device)
+        }
+        if let window = view.window {
+            guard window.attachedSheet == nil else { return }
+            alert.beginSheetModal(for: window, completionHandler: confirmed)
+        } else {
+            confirmed(alert.runModal())
+        }
+    }
+
+    private func startOperation(using engine: URL, on device: ConnectedDevice) {
+        sessionDevice = device
+        if operation != .justBoot { restoredDevice = nil }
         logWindow.clear()
         currentProgress = 0
         currentStage = "Starting surrealra1n"
@@ -938,14 +1012,12 @@ final class RestoreAssistantController: NSViewController, RestoreSessionDelegate
                 base: baseURL,
                 shsh: shshURL,
                 bootVersion: selectedBootVersion,
-                deviceIdentifier: device?.identifier ?? "",
+                deviceIdentifier: device.identifier,
                 operation: operation
             )
         } catch {
-            finishedCode = -1
             appendLog("\nGUI error: \(error.localizedDescription)\n")
-            step = .finished
-            render()
+            restoreSession(restoreSession, didFinishWith: -1)
         }
     }
 
@@ -1029,6 +1101,8 @@ final class RestoreAssistantController: NSViewController, RestoreSessionDelegate
         alert.addButton(withTitle: "Cancel")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
+        sessionDevice = device
+        if operation != .justBoot { restoredDevice = nil }
         logWindow.clear()
         appendLog("[demo] UI Demo Mode started\n[demo] No device commands will run\n")
         currentProgress = 0.02
@@ -1124,9 +1198,7 @@ final class RestoreAssistantController: NSViewController, RestoreSessionDelegate
     private func runDemoProgressStage(_ stages: [(Double, String)], index: Int) {
         guard index < stages.count else {
             demoTimer = nil
-            finishedCode = 0
-            step = .finished
-            render()
+            restoreSession(restoreSession, didFinishWith: 0)
             return
         }
         currentProgress = stages[index].0
@@ -1282,22 +1354,45 @@ final class RestoreAssistantController: NSViewController, RestoreSessionDelegate
         if step == .welcome || step == .options { render() }
     }
 
-    @objc private func selectTarget() { chooseIPSW(title: "Choose target IPSW") { targetURL = $0; render() } }
-    @objc private func selectBase() { chooseIPSW(title: "Choose currently signed base IPSW") { baseURL = $0; render() } }
-    @objc private func selectSHSH() {
-        let panel = NSOpenPanel()
-        panel.title = "Choose SHSH2 ticket"
-        panel.allowedContentTypes = [UTType(filenameExtension: "shsh2") ?? .data]
-        panel.allowsMultipleSelection = false
-        if panel.runModal() == .OK, let url = panel.url { shshURL = url; render() }
+    @objc private func selectTarget() {
+        chooseFirmwareFile(title: "Choose target IPSW", extension: "ipsw") { [weak self] url in
+            self?.targetURL = url
+            self?.render()
+        }
     }
 
-    private func chooseIPSW(title: String, completion: (URL) -> Void) {
+    @objc private func selectBase() {
+        chooseFirmwareFile(title: "Choose currently signed base IPSW", extension: "ipsw") { [weak self] url in
+            self?.baseURL = url
+            self?.render()
+        }
+    }
+
+    @objc private func selectSHSH() {
+        chooseFirmwareFile(title: "Choose SHSH2 ticket", extension: "shsh2") { [weak self] url in
+            self?.shshURL = url
+            self?.render()
+        }
+    }
+
+    private func chooseFirmwareFile(title: String, extension ext: String, completion: @escaping (URL) -> Void) {
+        if let firmwarePicker {
+            firmwarePicker(title, ext, completion)
+            return
+        }
         let panel = NSOpenPanel()
         panel.title = title
-        panel.allowedContentTypes = [UTType(filenameExtension: "ipsw") ?? .data]
+        panel.allowedContentTypes = [UTType(filenameExtension: ext) ?? .data]
         panel.allowsMultipleSelection = false
-        if panel.runModal() == .OK, let url = panel.url { completion(url) }
+        let picked: (NSApplication.ModalResponse) -> Void = { response in
+            if response == .OK, let url = panel.url { completion(url) }
+        }
+        if let window = view.window {
+            guard window.attachedSheet == nil else { return }
+            panel.beginSheetModal(for: window, completionHandler: picked)
+        } else {
+            picked(panel.runModal())
+        }
     }
 
     private func prepareEngine() {
@@ -1308,20 +1403,24 @@ final class RestoreAssistantController: NSViewController, RestoreSessionDelegate
             self.engineStatus = status
             if self.step == .welcome || self.step == .options { self.render() }
         }, completion: { [weak self] result in
-            guard let self = self else { return }
-            switch result {
-            case .success(let url):
-                self.engineURL = url
-                self.deviceObserver.engineURL = url
-                self.engineStatus = "Latest surrealra1n is ready."
-                self.engineDownloadFailed = false
-            case .failure(let error):
-                self.engineURL = nil
-                self.engineStatus = error.localizedDescription
-                self.engineDownloadFailed = true
-            }
-            if self.step == .welcome || self.step == .options { self.render() }
+            self?.engineDidPrepare(result)
         })
+    }
+
+    func engineDidPrepare(_ result: Result<URL, Error>) {
+        switch result {
+        case .success(let url):
+            engineURL = url
+            deviceObserver.engineURL = url
+            engineStatus = "Latest surrealra1n is ready."
+            engineDownloadFailed = false
+        case .failure(let error):
+            engineURL = nil
+            deviceObserver.engineURL = nil
+            engineStatus = error.localizedDescription
+            engineDownloadFailed = true
+        }
+        if step == .welcome || step == .options { render() }
     }
 
     private func heading(_ text: String) -> NSTextField {
@@ -1451,12 +1550,17 @@ final class RestoreAssistantController: NSViewController, RestoreSessionDelegate
     func restoreSession(_ session: RestoreSession, didFinishWith code: Int32) {
         finishedCode = code
         currentPrompt = nil
+        if code == 0 && operation == .tetheredRestore { restoredDevice = sessionDevice }
+        sessionDevice = nil
         step = .finished
         if let sheet = cancelSheet, let parent = sheet.sheetParent {
             parent.endSheet(sheet, returnCode: .alertFirstButtonReturn)
         }
         render()
-        if code != 0 && showLogsOnError && !demoMode { showLogs() }
+        if code != 0 && showLogsOnError && !demoMode {
+            logWindow.present(makeKey: false)
+            view.window?.makeKeyAndOrderFront(nil)
+        }
     }
 
     var hasRunningOperation: Bool { restoreSession.isRunning || demoTimer != nil }

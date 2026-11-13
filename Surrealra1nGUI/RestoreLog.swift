@@ -57,11 +57,15 @@ final class RestoreLogWindow: NSWindowController {
         ])
     }
 
-    func present() {
+    func present(makeKey: Bool = true) {
         guard let window else { return }
         if !window.isVisible { window.center() }
-        showWindow(nil)
-        window.makeKeyAndOrderFront(nil)
+        if makeKey {
+            showWindow(nil)
+            window.makeKeyAndOrderFront(nil)
+        } else {
+            window.orderFront(nil)
+        }
         transcript.showText(displayText)
     }
 

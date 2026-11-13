@@ -4,6 +4,10 @@ surrealra1n GUI is a native macOS front end for [surrealra1n](https://github.com
 
 A restore can erase the connected device, and tethered installations need Just Boot after every shutdown. Keep a backup and read the log before retrying a failed restore.
 
+## 0.0.7
+
+The GUI recognizes the current surrealra1n menus and uses the firmware files already selected in the wizard. After a tethered restore finishes, **Just Boot**, **Show Logs**, and **Done** are available. The boot picker keeps the saved versions visible while the restored device reconnects.
+
 ## 0.0.6
 
 The restore window is resizable. Long filenames and status messages fit the chosen size, long prompts scroll, and **Download Again** stays visible when setup fails. Progress updates keep the log and its scroll position in place while you read.
@@ -59,7 +63,7 @@ xcodebuild \
 To create the universal DMG and PKG used for a release:
 
 ```bash
-./scripts/package-release.sh 0.0.6
+./scripts/package-release.sh 0.0.7
 ```
 
 ## Demo mode

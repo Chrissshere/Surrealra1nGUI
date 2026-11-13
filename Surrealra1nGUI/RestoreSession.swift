@@ -1,4 +1,5 @@
 import Cocoa
+import Darwin
 
 enum RestoreOperation {
     case restoreWithBlobs
@@ -29,7 +30,8 @@ final class RestoreSession {
 
     private var process: Process?
     private var inputPipe: Pipe?
-    private var outputPipe: Pipe?
+    private var outputSource: DispatchSourceRead?
+    private let outputQueue = DispatchQueue(label: "com.surrealra1n.gui.engine-output", qos: .userInitiated)
     private var automationBuffer = ""
     private var menuStep = 0
     private var awaitingUser = false
@@ -38,15 +40,22 @@ final class RestoreSession {
     private var environmentFile: URL?
     private var askpassFile: URL?
     private var operation: RestoreOperation = .tetheredRestore
+    private var hasTargetIPSW = false
+    private var hasBaseIPSW = false
     private var dfuPhase = ""
     private var acceptsInput = false
     private var restoreStarted = false
-    private var sawRestoreSuccess = false
+    private var completionTail = ""
+    private var reportedCompletion = false
+    private var enteredRestoreMenu = false
+    private var stoppedAtMainMenu = false
 
-    var isRunning: Bool { return process?.isRunning == true }
+    var isRunning: Bool { process != nil }
 
     func start(engine: URL, target: URL?, base: URL?, shsh: URL?, bootVersion: String?, deviceIdentifier: String, operation: RestoreOperation) throws {
         guard !isRunning else { return }
+        var launched = false
+        defer { if !launched { cleanup() } }
         if operation == .restoreWithBlobs && Self.isA12OrA13(deviceIdentifier) {
             throw NSError(
                 domain: "Surrealra1nGUI",
@@ -60,9 +69,9 @@ final class RestoreSession {
 
         let sessionID = UUID().uuidString
         let scriptURL = engine.appendingPathComponent(".surrealra1n-gui-\(sessionID).sh")
+        temporaryScript = scriptURL
         try source.write(to: scriptURL, atomically: true, encoding: .utf8)
         try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: scriptURL.path)
-        temporaryScript = scriptURL
 
         let envURL = FileManager.default.temporaryDirectory.appendingPathComponent("surrealra1n-gui-env-\(sessionID).sh")
         let shellEnvironment = """
@@ -92,12 +101,22 @@ read() {
 sudo() { command /usr/bin/sudo -A "$@"; }
 
 """
-        try shellEnvironment.write(to: envURL, atomically: true, encoding: .utf8)
         environmentFile = envURL
+        try shellEnvironment.write(to: envURL, atomically: true, encoding: .utf8)
 
         let task = Process()
         let stdin = Pipe()
         let output = Pipe()
+        let outputHandle = output.fileHandleForReading
+        let descriptor = outputHandle.fileDescriptor
+        let flags = fcntl(descriptor, F_GETFL)
+        guard flags >= 0, fcntl(descriptor, F_SETFL, flags | O_NONBLOCK) >= 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        // The child can exit between checking isRunning and writing its reply.
+        guard fcntl(stdin.fileHandleForWriting.fileDescriptor, F_SETNOSIGPIPE, 1) >= 0 else {
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
         task.launchPath = "/bin/bash"
         task.arguments = [scriptURL.path]
         task.currentDirectoryPath = engine.path
@@ -114,9 +133,9 @@ sudo() { command /usr/bin/sudo -A "$@"; }
         env["SURREAL_GUI_BOOT_VERSION"] = bootVersion ?? ""
         if let bundledAskpass = Bundle.main.url(forResource: "surreal-askpass", withExtension: "sh") {
             let askpass = FileManager.default.temporaryDirectory.appendingPathComponent("surrealra1n-askpass-\(sessionID).sh")
+            askpassFile = askpass
             try FileManager.default.copyItem(at: bundledAskpass, to: askpass)
             try FileManager.default.setAttributes([.posixPermissions: 0o700], ofItemAtPath: askpass.path)
-            askpassFile = askpass
             env["SUDO_ASKPASS"] = askpass.path
         }
         let brewPaths = "/opt/homebrew/bin:/usr/local/bin:/opt/local/bin:"
@@ -124,9 +143,10 @@ sudo() { command /usr/bin/sudo -A "$@"; }
         task.environment = env
 
         self.operation = operation
+        hasTargetIPSW = target != nil
+        hasBaseIPSW = base != nil
         process = task
         inputPipe = stdin
-        outputPipe = output
         automationBuffer = ""
         menuStep = 0
         awaitingUser = false
@@ -134,27 +154,68 @@ sudo() { command /usr/bin/sudo -A "$@"; }
         dfuPhase = ""
         acceptsInput = true
         restoreStarted = false
-        sawRestoreSuccess = false
+        completionTail = ""
+        reportedCompletion = false
+        enteredRestoreMenu = false
+        stoppedAtMainMenu = false
 
-        output.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let data = handle.availableData
-            guard !data.isEmpty else { return }
-            let text = String(decoding: data, as: UTF8.self)
-            DispatchQueue.main.async { self?.consume(text) }
-        }
-        task.terminationHandler = { [weak self] task in
-            output.fileHandleForReading.readabilityHandler = nil
+        let reader = DispatchSource.makeReadSource(fileDescriptor: descriptor, queue: outputQueue)
+        outputSource = reader
+        reader.setCancelHandler { try? outputHandle.close() }
+        reader.setEventHandler { [weak self, weak task, weak reader] in
+            let output = Self.readAvailableOutput(from: descriptor)
+            if output.atEnd { reader?.cancel() }
+            guard !output.text.isEmpty else { return }
             DispatchQueue.main.async {
-                guard let self = self else { return }
-                self.acceptsInput = false
-                let status: Int32 = self.sawRestoreSuccess ? 0 : task.terminationStatus
-                self.cleanup()
-                self.delegate?.restoreSession(self, didFinishWith: status)
+                guard let self, let task, self.process === task else { return }
+                self.consume(output.text)
+            }
+        }
+        task.terminationHandler = { [weak self, weak reader] task in
+            guard let self else { reader?.cancel(); return }
+            self.outputQueue.async {
+                // Serialize the last read with live output, without waiting for EOF from helper processes.
+                let finalText = reader?.isCancelled == false ? Self.readAvailableOutput(from: descriptor).text : ""
+                reader?.cancel()
+                DispatchQueue.main.async {
+                    guard self.process === task else { return }
+                    self.acceptsInput = false
+                    if !finalText.isEmpty { self.consume(finalText) }
+                    let status = self.completionStatus(for: task.terminationStatus)
+                    self.cleanup()
+                    self.delegate?.restoreSession(self, didFinishWith: status)
+                }
             }
         }
 
+        reader.resume()
+        try task.run()
+        launched = true
         delegate?.restoreSession(self, didAdvanceTo: "Starting surrealra1n", progress: 0.01)
-        task.launch()
+    }
+
+    private static func readAvailableOutput(from descriptor: Int32) -> (text: String, atEnd: Bool) {
+        var buffer = [UInt8](repeating: 0, count: 8_192)
+        var data = Data()
+        var atEnd = false
+        while data.count < 256 * 1_024 {
+            let count = buffer.withUnsafeMutableBytes { Darwin.read(descriptor, $0.baseAddress, $0.count) }
+            if count > 0 {
+                data.append(contentsOf: buffer.prefix(count))
+            } else if count < 0 && errno == EINTR {
+                continue
+            } else {
+                atEnd = count == 0 || (errno != EAGAIN && errno != EWOULDBLOCK)
+                break
+            }
+        }
+        return (String(decoding: data, as: UTF8.self), atEnd)
+    }
+
+    private func completionStatus(for status: Int32) -> Int32 {
+        // The exit status also covers work after the engine prints its restore message.
+        if status == 0 && !restoreStarted && !reportedCompletion { return 1 }
+        return status
     }
 
     func prepareSourceForGUI(_ source: String) throws -> String {
@@ -186,58 +247,84 @@ sudo() { command /usr/bin/sudo -A "$@"; }
     }
 
     func cancel() {
-        process?.interrupt()
+        acceptsInput = false
+        if let process, process.isRunning { process.interrupt() }
     }
 
-    private func consume(_ text: String, allowAutomation: Bool = true) {
+    private func consume(_ text: String) {
         delegate?.restoreSession(self, received: text)
-        let lower = text.lowercased()
-        if lower.contains("status: restore finished")
-            || lower.contains("restore has finished")
-            || lower.contains("restore has completed") {
-            sawRestoreSuccess = true
+        let plain = text.replacingOccurrences(of: "\u{001B}\\[[0-9;?]*[ -/]*[@-~]", with: "", options: .regularExpression)
+        let completionText = completionTail + plain.lowercased()
+        completionTail = String(completionText.suffix(96))
+        let completionMessage = operation == .justBoot
+            ? completionText.contains("device should now boot")
+            : ["status: restore finished", "restore has finished", "restore has completed"].contains(where: completionText.contains)
+        if completionMessage && !reportedCompletion {
+            reportedCompletion = true
+            maximumProgress = max(maximumProgress, 0.99)
+            let stage = operation == .tetheredRestore ? "Finalizing restore and boot files…" : "Finishing surrealra1n…"
+            delegate?.restoreSession(self, didAdvanceTo: stage, progress: maximumProgress)
+        } else if !reportedCompletion {
+            updateProgress(from: plain)
+            updateDFUGuide(from: plain)
         }
-        automationBuffer += text.replacingOccurrences(of: "\u{001B}\\[[0-9;?]*[ -/]*[@-~]", with: "", options: .regularExpression)
-        if automationBuffer.count > 16_000 {
+        guard acceptsInput && process?.isRunning == true else { return }
+        automationBuffer += plain
+        if automationBuffer.utf8.count > 16_000 {
             automationBuffer = String(automationBuffer.suffix(12_000))
         }
-        updateProgress(from: text)
-        updateDFUGuide(from: text)
-        if allowAutomation && acceptsInput && process?.isRunning == true {
-            handleAutomation()
-        }
+        handleAutomation()
     }
 
     private func handleAutomation() {
         guard !awaitingUser else { return }
         let b = automationBuffer
+        let mainMenu = containsAll(["1. Downgrade Options", "2. Misc Utilities"], in: b)
+        let restoreMenu = containsAll(["1. Restore (with SHSH blobs)", "2. Restore (Tethered)", "4. Just Boot"], in: b)
+        let menuPrompt = b.trimmingCharacters(in: .whitespacesAndNewlines)
+            .range(of: #"Please input an option \(1-[0-9]+\):$"#, options: .regularExpression) != nil
 
         if b.trimmingCharacters(in: .whitespacesAndNewlines).hasSuffix("Use MacPorts instead? [y/n]") {
             request(.packageManager)
         } else if b.contains("Would you like to update now? (y/n):") {
             sendAutomated("n")
-        } else if containsAll(["1. Downgrade Options", "2. Misc Utilities", "4. Exit"], in: b) {
-            sendAutomated("1")
+        } else if mainMenu && menuPrompt,
+                  let exitItem = b.range(of: #"(?m)^[0-9]+\. Exit[ \t]*\r?$"#, options: .regularExpression) {
+            if enteredRestoreMenu && !stoppedAtMainMenu {
+                stoppedAtMainMenu = true
+                if !reportedCompletion {
+                    restoreStarted = false
+                    delegate?.restoreSession(self, received: "\nThe engine returned to its main menu without completing the selected operation. Check the device connection and the log before retrying.\n")
+                }
+                sendAutomated(String(b[exitItem].prefix(while: \.isNumber)))
+            } else if !enteredRestoreMenu {
+                enteredRestoreMenu = true
+                sendAutomated("1")
+            }
         } else if b.contains("A12/A13 device support is entirely experimental") && b.contains("Press enter to continue") {
             sendAutomated("")
-        } else if containsAll(["1. Restore (with SHSH blobs)", "2. Restore (Tethered)", "4. Just Boot", "5. Back"], in: b) {
+        } else if restoreMenu && menuPrompt {
             switch operation {
             case .restoreWithBlobs: sendAutomated("1")
             case .tetheredRestore: sendAutomated("2")
             case .untethered1033: sendAutomated("3")
             case .justBoot: sendAutomated("4")
             }
-        } else if operation == .tetheredRestore && containsAll(["1. Select Target IPSW", "2. Select Base IPSW", "3. Start Restore", "4. Back"], in: b) {
+        } else if menuPrompt && containsAll(["1. Select an IPSW file", "2. Download an IPSW file Online"], in: b)
+                    && ((b.contains("obtain the target ipsw.") && hasTargetIPSW)
+                        || (b.contains("obtain the base ipsw.") && hasBaseIPSW)) {
+            sendAutomated("1")
+        } else if menuPrompt && operation == .tetheredRestore && containsAll(["1. Select Target IPSW", "2. Select Base IPSW", "3. Start Restore", "4. Back"], in: b) {
             menuStep += 1
             if menuStep == 1 { sendAutomated("1") }
             else if menuStep == 2 { sendAutomated("2") }
             else { restoreStarted = true; sendAutomated("3") }
-        } else if operation == .restoreWithBlobs && containsAll(["1. Select Target IPSW", "2. Select SHSH", "3. Start Restore", "4. Back"], in: b) {
+        } else if menuPrompt && operation == .restoreWithBlobs && containsAll(["1. Select Target IPSW", "2. Select SHSH", "3. Start Restore", "4. Back"], in: b) {
             menuStep += 1
             if menuStep == 1 { sendAutomated("1") }
             else if menuStep == 2 { sendAutomated("2") }
             else { restoreStarted = true; sendAutomated("3") }
-        } else if operation == .untethered1033 && containsAll(["1. Select 10.3.3 IPSW", "2. Start Restore", "3. Back"], in: b) {
+        } else if menuPrompt && operation == .untethered1033 && containsAll(["1. Select 10.3.3 IPSW", "2. Start Restore", "3. Back"], in: b) {
             menuStep += 1
             if menuStep == 1 { sendAutomated("1") }
             else { restoreStarted = true; sendAutomated("2") }
@@ -298,7 +385,6 @@ sudo() { command /usr/bin/sudo -A "$@"; }
         if lower.contains("updating baseband") { stage = "Updating baseband"; floor = 0.82 }
         if lower.contains("fdr") && maximumProgress >= 0.62 { stage = "Finalizing device restore"; floor = 0.88 }
         if lower.contains("sealing system volume") { stage = "Sealing system volume"; floor = 0.95 }
-        if lower.contains("status: restore finished") || lower.contains("restore has finished") || lower.contains("restore has completed") { stage = "Restore complete"; floor = 1.0 }
 
         if maximumProgress >= 0.62,
            let componentProgress = reportedPercentage(in: text) {
@@ -320,7 +406,6 @@ sudo() { command /usr/bin/sudo -A "$@"; }
         if lower.contains("sending devicetree") { stage = "Sending DeviceTree"; floor = 0.84 }
         if lower.contains("sending trustcache") { stage = "Sending trustcache"; floor = 0.90 }
         if lower.contains("sending kernelcache") { stage = "Sending Kernelcache"; floor = 0.96 }
-        if lower.contains("device should now boot") { stage = "Device should now boot"; floor = 1.0 }
         maximumProgress = max(maximumProgress, floor)
         if let stage = stage { delegate?.restoreSession(self, didAdvanceTo: stage, progress: maximumProgress) }
     }
@@ -434,7 +519,7 @@ fi
 
     private func cleanup() {
         acceptsInput = false
-        outputPipe?.fileHandleForReading.readabilityHandler = nil
+        outputSource?.cancel()
         try? inputPipe?.fileHandleForWriting.close()
         if let url = temporaryScript { try? FileManager.default.removeItem(at: url) }
         if let url = environmentFile { try? FileManager.default.removeItem(at: url) }
@@ -444,6 +529,6 @@ fi
         askpassFile = nil
         process = nil
         inputPipe = nil
-        outputPipe = nil
+        outputSource = nil
     }
 }
